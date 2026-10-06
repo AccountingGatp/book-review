@@ -1131,6 +1131,8 @@ class Review {
   detectRelatedParties() {
     const cfg = this.rules.related_parties || {};
     const keys = new Set(cfg.names || []);
+    const cfgKeys = [...keys];
+    const auto = new Set();
     if (cfg.auto_detect !== false) {
       const accts = []; const s = new Set();
       for (const l of this.td) if (!s.has(l.account)) { s.add(l.account); accts.push(l.account); }
@@ -1138,9 +1140,9 @@ class Review {
         const parts = a.split(' > ');
         const last = parts[parts.length - 1];
         let m = /^to\/from\s+(.+)$/i.exec(last);
-        if (m) keys.add(pyStrip(m[1]));
+        if (m) { keys.add(pyStrip(m[1])); auto.add(pyStrip(m[1])); }
         m = /^(.+?)\s+card$/i.exec(last);
-        if (m && parts.length > 1) keys.add(pyStrip(m[1]));
+        if (m && parts.length > 1) { keys.add(pyStrip(m[1])); auto.add(pyStrip(m[1])); }
       }
     }
     const rel = new Set();
@@ -1152,6 +1154,10 @@ class Review {
       }
     }
     this.related = rel; this.related_keys = [...keys].sort(cmpv);
+    // companies the books treat as related (To/From X, X Card accounts) that are NOT on the confirmed list
+    const tk = x => new Set(normName(x).split(/\s+/).filter(Boolean));
+    const known = cfgKeys.map(tk);
+    this.new_related = [...auto].filter(a => { const t = tk(a); return t.size && !known.some(k => k.size && ([...k].every(x => t.has(x)) || [...t].every(x => k.has(x)))); }).sort(cmpv);
     this.notes.push('Related parties detected from the reports: ' + ([...rel].sort(cmpv).join(', ') || 'none'));
   }
 
@@ -1312,9 +1318,14 @@ class Review {
         add('Reconciliation', `${r.check}: ${r.item} - ${r.note}`, 1, r.difference !== null ? r.difference : r.actual, "Tab 'Reconciliation'");
       }
     }
+    for (const c of this.new_related || []) {
+      add('Checkpoint', `New related company found in the books: "${c}". Confirm it is a related company and add it to the related-company list (rules) so allocation and recharge checks include it.`, null, null, 'Page: "New related companies" / rules.json related_parties');
+    }
+    this.checkpoint_rows = [];
     for (const n of this.rules.review_notes || []) {
       const hit = n.name ? this.td.filter(l => (l.name || '').toLowerCase().includes(n.name.toLowerCase())) : [];
-      if (hit.length || !n.name) add('Note', n.message, hit.length, hit.length ? pyRound(npSum(hit.map(l => Math.abs(l.amount))), 2) : null, n.where || 'Name Audit');
+      for (const l of hit) this.checkpoint_rows.push({ checkpoint: n.name, date: l.date, type: l.type, num: l.num, name: l.name, memo: l.memo, account: l.account, amount: l.amount });
+      if (hit.length || !n.name) add('Checkpoint', n.message, hit.length, hit.length ? pyRound(npSum(hit.map(l => Math.abs(l.amount))), 2) : null, n.where || "Tab 'Checkpoints'");
     }
     this.checklist = rows;
   }

@@ -251,7 +251,9 @@ export function buildReport(rv, opts = {}) {
   addSheet(wb, 'Cash & 1099', cCols, rv.cash_rows.map(r => cCols.map(c => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
   const lgCols = ['step', 'status', 'message'];
   addSheet(wb, 'Run Log', lgCols, rv.run_log.map(r => lgCols.map(c => r[c])), { widths: { step: 40, message: 90 } });
-  addSheet(wb, 'Related Parties', ['related_party'], [...rv.related].sort(cmpv).map(x => [x]), { widths: { related_party: 40 } });
+  addSheet(wb, 'Related Parties', ['related_party', 'status'], [...rv.related].sort(cmpv).map(x => [x, 'In books']).concat((rv.new_related || []).map(x => [x, 'NEW - confirm and add to rules'])), { widths: { related_party: 40, status: 34 } });
+  const kCols = ['checkpoint', 'date', 'type', 'num', 'name', 'memo', 'account', 'amount'];
+  addSheet(wb, 'Checkpoints', kCols, (rv.checkpoint_rows || []).map(r => kCols.map(c => cellOrBlank(c === 'date' && r[c] ? r[c] : r[c]))), { widths: { memo: 50, account: 34, name: 28, checkpoint: 16 } });
   const rrCols = ['id', 'applies_to', 'pattern', 'expected_accounts', 'severity', 'note'];
   addSheet(wb, 'Rules Used', rrCols, rv.rules.keyword_rules.map(r => [r.id, r.scope, r.pattern, (r.expected || []).join(', '), r.severity, r.note]), { widths: { pattern: 60, expected_accounts: 60, note: 60 } });
 
@@ -268,6 +270,8 @@ export function buildReport(rv, opts = {}) {
     by_check,
     top: lineFl.slice(0, 25).map(f => ({ ref: f.ref, sev: f.severity, date: f.date ? isoDate(f.date) : '', name: f.name || '', amount: f.amount, issue: f.issue })),
     notes: notes.slice(0, rv.notes.length),
+    new_related: rv.new_related || [],
+    checkpoints: (rv.checkpoint_rows || []).map(r => ({ date: r.date ? isoDate(r.date) : '', type: r.type, name: r.name || '', memo: r.memo || '', account: r.account, amount: r.amount, checkpoint: r.checkpoint })),
     detected: opts.detected || null,
     coverage: Number.isNaN(cov) ? null : cov,
     no_basis_lines: noBasis,

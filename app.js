@@ -21,7 +21,12 @@ let defaultRules = "";
 let payeeFile = null;
 let xlsxBytes = null;
 
-defaultRules = JSON.stringify(DEFAULT_RULES, null, 2); $("#rules").value = defaultRules;
+defaultRules = JSON.stringify(DEFAULT_RULES, null, 2);
+const store = { get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} } };
+$("#rules").value = store.get("books.rules") || defaultRules;
+$("#company").value = store.get("books.company") || "";
+$("#rules").addEventListener("change", () => store.set("books.rules", $("#rules").value));
+$("#company").addEventListener("change", () => store.set("books.company", $("#company").value));
 
 function guess(name) {
   const b = name.toLowerCase();
@@ -73,7 +78,7 @@ $("#pick").onchange = (e) => { addFiles([...e.target.files]); e.target.value = "
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => addFiles([...e.dataTransfer.files]));
 $("#payee").onchange = (e) => { payeeFile = e.target.files[0] || null; };
-$("#rulesReset").onclick = () => { $("#rules").value = defaultRules; $("#rulesMsg").textContent = "Reset."; };
+$("#rulesReset").onclick = () => { $("#rules").value = defaultRules; store.set("books.rules", defaultRules); $("#rulesMsg").textContent = "Reset."; };
 
 function setStatus(msg, pct) { $("#status").textContent = msg; if (pct != null) $("#bar").style.width = pct + "%"; }
 
@@ -114,16 +119,28 @@ function table(el, head, rows) {
 }
 function show(r) {
   $("#out").classList.remove("hide");
-  $("#period").textContent = `Period ${r.period[0]} to ${r.period[1]} · ${r.lines.toLocaleString()} ledger lines`;
+  $("#period").textContent = `Period ${r.period[0]} to ${r.period[1]} · ${r.lines.total.toLocaleString()} ledger lines (${r.lines.checked.toLocaleString()} checked, ${r.lines.flagged.toLocaleString()} flagged)`;
   const s = r.severity;
   $("#stats").innerHTML = [["Total exceptions", r.total], ["High", s.High || 0], ["Medium", s.Medium || 0], ["Low", s.Low || 0], ["Reconciliation mismatches", r.recon_bad]]
     .map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
   $("#notes").innerHTML = (r.run_problems.length ? `<span class="bad">Some checks were skipped: ${r.run_problems.map((p) => esc(p.step + " – " + p.message)).join("; ")}</span><br>` : "") + r.notes.map(esc).join("<br>");
   table($("#ck"), [{ t: "Area" }, { t: "Issue" }, { t: "Lines", num: 1 }, { t: "Amount", num: 1 }, { t: "Where" }],
-    r.checklist.map((c) => [esc(c.area), esc(c.issue), c.lines, fmt(c.amount), esc(c.where_to_look)]));
+    r.checklist.map((c) => [esc(c.area), esc(c.issue), c.lines ?? "", fmt(c.amount), esc(c.where_to_look)]));
   table($("#top"), [{ t: "Ref" }, { t: "Sev" }, { t: "Date" }, { t: "Name" }, { t: "Amount", num: 1 }, { t: "Issue" }],
     r.top.map((t) => [t.ref, `<span class="tag ${t.sev}">${t.sev}</span>`, t.date, esc(t.name), fmt(t.amount), esc(t.issue)]));
-  table($("#bychk"), [{ t: "Check" }, { t: "Count", num: 1 }], Object.entries(r.by_check).map(([k, v]) => [esc(k), v]));
+  table($("#bychk"), [{ t: "Check" }, { t: "High", num: 1 }, { t: "Medium", num: 1 }, { t: "Low", num: 1 }, { t: "Total", num: 1 }], r.by_check.map((c) => [esc(c.check), c.High || "", c.Medium || "", c.Low || "", c.total]));
+  const nr = r.new_related || [];
+  $("#newrel").classList.toggle("hide", !nr.length);
+  $("#newrelList").innerHTML = nr.map((c) => `<div class="row" style="margin-bottom:8px"><b>${esc(c)}</b><button data-conf="${esc(c)}">Confirm as related company</button><span class="mute"></span></div>`).join("");
+  $("#newrelList").querySelectorAll("[data-conf]").forEach((b) => (b.onclick = () => {
+    const o = JSON.parse($("#rules").value); o.related_parties = o.related_parties || {}; o.related_parties.names = [...new Set([...(o.related_parties.names || []), b.dataset.conf])];
+    $("#rules").value = JSON.stringify(o, null, 2); store.set("books.rules", $("#rules").value);
+    b.disabled = true; b.nextElementSibling.textContent = "Added and remembered. Run the review again to apply.";
+  }));
+  const ck = r.checkpoints || [];
+  $("#ckpt").classList.toggle("hide", !ck.length);
+  table($("#ckptTable"), [{ t: "Checkpoint" }, { t: "Date" }, { t: "Type" }, { t: "Name" }, { t: "Memo" }, { t: "Account" }, { t: "Amount", num: 1 }],
+    ck.map((c) => [esc(c.checkpoint), c.date, esc(c.type), esc(c.name), esc(c.memo), esc(c.account), fmt(c.amount)]));
   $("#out").scrollIntoView({ behavior: "smooth" });
 }
 $("#dl").onclick = () => {

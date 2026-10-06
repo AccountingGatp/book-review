@@ -1440,6 +1440,8 @@
     detectRelatedParties() {
       const cfg = this.rules.related_parties || {};
       const keys = new Set(cfg.names || []);
+      const cfgKeys = [...keys];
+      const auto = /* @__PURE__ */ new Set();
       if (cfg.auto_detect !== false) {
         const accts = [];
         const s = /* @__PURE__ */ new Set();
@@ -1451,9 +1453,15 @@
           const parts = a.split(" > ");
           const last = parts[parts.length - 1];
           let m = /^to\/from\s+(.+)$/i.exec(last);
-          if (m) keys.add(pyStrip(m[1]));
+          if (m) {
+            keys.add(pyStrip(m[1]));
+            auto.add(pyStrip(m[1]));
+          }
           m = /^(.+?)\s+card$/i.exec(last);
-          if (m && parts.length > 1) keys.add(pyStrip(m[1]));
+          if (m && parts.length > 1) {
+            keys.add(pyStrip(m[1]));
+            auto.add(pyStrip(m[1]));
+          }
         }
       }
       const rel = /* @__PURE__ */ new Set();
@@ -1466,6 +1474,12 @@
       }
       this.related = rel;
       this.related_keys = [...keys].sort(cmpv);
+      const tk = (x) => new Set(normName(x).split(/\s+/).filter(Boolean));
+      const known = cfgKeys.map(tk);
+      this.new_related = [...auto].filter((a) => {
+        const t = tk(a);
+        return t.size && !known.some((k) => k.size && ([...k].every((x) => t.has(x)) || [...t].every((x) => k.has(x))));
+      }).sort(cmpv);
       this.notes.push("Related parties detected from the reports: " + ([...rel].sort(cmpv).join(", ") || "none"));
     }
     checkApprovedVendors() {
@@ -1665,9 +1679,14 @@
           add("Reconciliation", `${r.check}: ${r.item} - ${r.note}`, 1, r.difference !== null ? r.difference : r.actual, "Tab 'Reconciliation'");
         }
       }
+      for (const c of this.new_related || []) {
+        add("Checkpoint", `New related company found in the books: "${c}". Confirm it is a related company and add it to the related-company list (rules) so allocation and recharge checks include it.`, null, null, 'Page: "New related companies" / rules.json related_parties');
+      }
+      this.checkpoint_rows = [];
       for (const n of this.rules.review_notes || []) {
         const hit = n.name ? this.td.filter((l) => (l.name || "").toLowerCase().includes(n.name.toLowerCase())) : [];
-        if (hit.length || !n.name) add("Note", n.message, hit.length, hit.length ? pyRound(npSum(hit.map((l) => Math.abs(l.amount))), 2) : null, n.where || "Name Audit");
+        for (const l of hit) this.checkpoint_rows.push({ checkpoint: n.name, date: l.date, type: l.type, num: l.num, name: l.name, memo: l.memo, account: l.account, amount: l.amount });
+        if (hit.length || !n.name) add("Checkpoint", n.message, hit.length, hit.length ? pyRound(npSum(hit.map((l) => Math.abs(l.amount))), 2) : null, n.where || "Tab 'Checkpoints'");
       }
       this.checklist = rows;
     }
@@ -2101,7 +2120,9 @@
     addSheet(wb, "Cash & 1099", cCols, rv.cash_rows.map((r) => cCols.map((c) => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
     const lgCols = ["step", "status", "message"];
     addSheet(wb, "Run Log", lgCols, rv.run_log.map((r) => lgCols.map((c) => r[c])), { widths: { step: 40, message: 90 } });
-    addSheet(wb, "Related Parties", ["related_party"], [...rv.related].sort(cmpv2).map((x) => [x]), { widths: { related_party: 40 } });
+    addSheet(wb, "Related Parties", ["related_party", "status"], [...rv.related].sort(cmpv2).map((x) => [x, "In books"]).concat((rv.new_related || []).map((x) => [x, "NEW - confirm and add to rules"])), { widths: { related_party: 40, status: 34 } });
+    const kCols = ["checkpoint", "date", "type", "num", "name", "memo", "account", "amount"];
+    addSheet(wb, "Checkpoints", kCols, (rv.checkpoint_rows || []).map((r) => kCols.map((c) => cellOrBlank(c === "date" && r[c] ? r[c] : r[c]))), { widths: { memo: 50, account: 34, name: 28, checkpoint: 16 } });
     const rrCols = ["id", "applies_to", "pattern", "expected_accounts", "severity", "note"];
     addSheet(wb, "Rules Used", rrCols, rv.rules.keyword_rules.map((r) => [r.id, r.scope, r.pattern, (r.expected || []).join(", "), r.severity, r.note]), { widths: { pattern: 60, expected_accounts: 60, note: 60 } });
     const by_check = pvKeys.map((k) => {
@@ -2119,6 +2140,8 @@
       by_check,
       top: lineFl.slice(0, 25).map((f) => ({ ref: f.ref, sev: f.severity, date: f.date ? isoDate(f.date) : "", name: f.name || "", amount: f.amount, issue: f.issue })),
       notes: notes.slice(0, rv.notes.length),
+      new_related: rv.new_related || [],
+      checkpoints: (rv.checkpoint_rows || []).map((r) => ({ date: r.date ? isoDate(r.date) : "", type: r.type, name: r.name || "", memo: r.memo || "", account: r.account, amount: r.amount, checkpoint: r.checkpoint })),
       detected: opts.detected || null,
       coverage: Number.isNaN(cov) ? null : cov,
       no_basis_lines: noBasis
@@ -2794,7 +2817,22 @@
   var payeeFile = null;
   var xlsxBytes = null;
   defaultRules = JSON.stringify(rules_default, null, 2);
-  $("#rules").value = defaultRules;
+  var store = { get: (k) => {
+    try {
+      return localStorage.getItem(k);
+    } catch (_) {
+      return null;
+    }
+  }, set: (k, v) => {
+    try {
+      localStorage.setItem(k, v);
+    } catch (_) {
+    }
+  } };
+  $("#rules").value = store.get("books.rules") || defaultRules;
+  $("#company").value = store.get("books.company") || "";
+  $("#rules").addEventListener("change", () => store.set("books.rules", $("#rules").value));
+  $("#company").addEventListener("change", () => store.set("books.company", $("#company").value));
   function guess(name) {
     const b = name.toLowerCase();
     for (const [k, [, re]] of Object.entries(ROLES)) if (re.test(b)) return k;
@@ -2866,6 +2904,7 @@
   };
   $("#rulesReset").onclick = () => {
     $("#rules").value = defaultRules;
+    store.set("books.rules", defaultRules);
     $("#rulesMsg").textContent = "Reset.";
   };
   function setStatus(msg, pct) {
@@ -2917,21 +2956,40 @@
   }
   function show(r) {
     $("#out").classList.remove("hide");
-    $("#period").textContent = `Period ${r.period[0]} to ${r.period[1]} \xB7 ${r.lines.toLocaleString()} ledger lines`;
+    $("#period").textContent = `Period ${r.period[0]} to ${r.period[1]} \xB7 ${r.lines.total.toLocaleString()} ledger lines (${r.lines.checked.toLocaleString()} checked, ${r.lines.flagged.toLocaleString()} flagged)`;
     const s = r.severity;
     $("#stats").innerHTML = [["Total exceptions", r.total], ["High", s.High || 0], ["Medium", s.Medium || 0], ["Low", s.Low || 0], ["Reconciliation mismatches", r.recon_bad]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
     $("#notes").innerHTML = (r.run_problems.length ? `<span class="bad">Some checks were skipped: ${r.run_problems.map((p) => esc(p.step + " \u2013 " + p.message)).join("; ")}</span><br>` : "") + r.notes.map(esc).join("<br>");
     table(
       $("#ck"),
       [{ t: "Area" }, { t: "Issue" }, { t: "Lines", num: 1 }, { t: "Amount", num: 1 }, { t: "Where" }],
-      r.checklist.map((c) => [esc(c.area), esc(c.issue), c.lines, fmt(c.amount), esc(c.where_to_look)])
+      r.checklist.map((c) => [esc(c.area), esc(c.issue), c.lines ?? "", fmt(c.amount), esc(c.where_to_look)])
     );
     table(
       $("#top"),
       [{ t: "Ref" }, { t: "Sev" }, { t: "Date" }, { t: "Name" }, { t: "Amount", num: 1 }, { t: "Issue" }],
       r.top.map((t) => [t.ref, `<span class="tag ${t.sev}">${t.sev}</span>`, t.date, esc(t.name), fmt(t.amount), esc(t.issue)])
     );
-    table($("#bychk"), [{ t: "Check" }, { t: "Count", num: 1 }], Object.entries(r.by_check).map(([k, v]) => [esc(k), v]));
+    table($("#bychk"), [{ t: "Check" }, { t: "High", num: 1 }, { t: "Medium", num: 1 }, { t: "Low", num: 1 }, { t: "Total", num: 1 }], r.by_check.map((c) => [esc(c.check), c.High || "", c.Medium || "", c.Low || "", c.total]));
+    const nr = r.new_related || [];
+    $("#newrel").classList.toggle("hide", !nr.length);
+    $("#newrelList").innerHTML = nr.map((c) => `<div class="row" style="margin-bottom:8px"><b>${esc(c)}</b><button data-conf="${esc(c)}">Confirm as related company</button><span class="mute"></span></div>`).join("");
+    $("#newrelList").querySelectorAll("[data-conf]").forEach((b) => b.onclick = () => {
+      const o = JSON.parse($("#rules").value);
+      o.related_parties = o.related_parties || {};
+      o.related_parties.names = [.../* @__PURE__ */ new Set([...o.related_parties.names || [], b.dataset.conf])];
+      $("#rules").value = JSON.stringify(o, null, 2);
+      store.set("books.rules", $("#rules").value);
+      b.disabled = true;
+      b.nextElementSibling.textContent = "Added and remembered. Run the review again to apply.";
+    });
+    const ck = r.checkpoints || [];
+    $("#ckpt").classList.toggle("hide", !ck.length);
+    table(
+      $("#ckptTable"),
+      [{ t: "Checkpoint" }, { t: "Date" }, { t: "Type" }, { t: "Name" }, { t: "Memo" }, { t: "Account" }, { t: "Amount", num: 1 }],
+      ck.map((c) => [esc(c.checkpoint), c.date, esc(c.type), esc(c.name), esc(c.memo), esc(c.account), fmt(c.amount)])
+    );
     $("#out").scrollIntoView({ behavior: "smooth" });
   }
   $("#dl").onclick = () => {
