@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Books Review</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231F3A5F'/%3E%3Cpath d='M9 17l5 5 9-12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1b2430;--mute:#667085;--line:#e3e7ee;--brand:#1F3A5F;--brand2:#2f5d99;
+--hi:#fbd5c4;--hi-t:#8a2d0b;--med:#ffeab0;--med-t:#6b4a00;--lo:#dff0d8;--lo-t:#2b5a1e;--ok:#1a7f4b;--bad:#b42318}
+@media (prefers-color-scheme:dark){:root{--bg:#10151c;--card:#171e28;--ink:#e8edf4;--mute:#97a3b4;--line:#2a3442;--brand:#7fa8dc;--brand2:#9dbde6;
+--hi:#5a2a1a;--hi-t:#ffb99c;--med:#4d3c0c;--med-t:#ffd979;--lo:#1f3a1a;--lo-t:#a9dc98;--ok:#4ac98a;--bad:#ff8a7a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:28px 16px 80px}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:17px;margin:0 0 12px}
+.sub{color:var(--mute);margin:0 0 22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:18px}
+.drop{border:2px dashed var(--line);border-radius:12px;padding:28px;text-align:center;cursor:pointer;color:var(--mute);transition:.15s}
+.drop.over,.drop:hover{border-color:var(--brand2);color:var(--ink);background:color-mix(in srgb,var(--brand2) 6%,transparent)}
+.drop b{color:var(--ink)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute)}
+select,input[type=text],textarea{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+input[type=text]{width:100%}
+textarea{width:100%;min-height:260px;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace}
+button{font:inherit;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:9px 16px;cursor:pointer}
+button.primary{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:600}
+@media (prefers-color-scheme:dark){button.primary{color:#10151c}}
+button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.grow{flex:1;min-width:220px}
+.tag{font-size:12px;padding:2px 8px;border-radius:99px;font-weight:600;white-space:nowrap}
+.High{background:var(--hi);color:var(--hi-t)}.Medium{background:var(--med);color:var(--med-t)}.Low{background:var(--lo);color:var(--lo-t)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:6px}
+.stat{border:1px solid var(--line);border-radius:10px;padding:12px}.stat b{display:block;font-size:24px}.stat span{color:var(--mute);font-size:13px}
+.bar{height:8px;background:var(--line);border-radius:9px;overflow:hidden;margin-top:10px}.bar i{display:block;height:100%;width:0;background:var(--brand2);transition:width .4s}
+.mute{color:var(--mute)}.ok{color:var(--ok)}.bad{color:var(--bad)}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+details summary{cursor:pointer;color:var(--mute)}
+.scroll{overflow-x:auto}
+.hide{display:none}
+.privacy{font-size:13px;color:var(--mute);margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Books Review</h1>
+  <p class="sub">Upload the QuickBooks exports and get a line-by-line review of accounts, names, memos, duplicates and reconciliations. Everything runs inside your browser — the files are never uploaded anywhere.</p>
+
+  <div class="card">
+    <h2>1 · Reports</h2>
+    <div id="drop" class="drop"><b>Drop the Excel exports here</b> or click to choose<br>
+      <span class="mute">Transaction Detail, General Ledger, P&amp;L Detail, Balance Sheet Detail, Trial Balance, A/R and A/P aging (year-to-date)</span></div>
+    <input id="pick" type="file" accept=".xlsx,.xlsm" multiple class="hide">
+    <div class="scroll"><table id="files" class="hide"><thead><tr><th>File</th><th>Report type</th><th></th></tr></thead><tbody></tbody></table></div>
+    <p id="fmsg" class="mute"></p>
+    <p id="loaderr" class="bad hide">The page script did not load. Re-open the site, or hard-refresh (Ctrl+Shift+R).</p>
+  </div>
+
+  <div class="card">
+    <h2>2 · Optional</h2>
+    <div class="row">
+      <div class="grow"><label class="mute">Company name (shown on the report)</label><input id="company" type="text" placeholder="e.g. Bluntd"></div>
+      <div class="grow"><label class="mute">Cash-withdrawal / 1099 payee list (.xlsx: date, amount, payee, 1099)</label><br><input id="payee" type="file" accept=".xlsx"></div>
+    </div>
+    <details style="margin-top:14px"><summary>Review rules (advanced) — edit related companies, allocation rules, approved vendors, keyword rules</summary>
+      <textarea id="rules" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:8px"><button id="rulesReset">Reset to default</button><span id="rulesMsg" class="mute"></span></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <div class="row"><button id="run" class="primary" disabled>Run review</button><span id="status" class="mute"></span></div>
+    <div class="bar"><i id="bar"></i></div>
+    <p class="privacy">Everything runs locally in your browser — nothing is uploaded and nothing needs to be installed.</p>
+  </div>
+
+  <div id="out" class="hide">
+    <div class="card">
+      <div class="row" style="justify-content:space-between"><h2 style="margin:0">Result</h2><button id="dl" class="primary">Download full Excel report</button></div>
+      <p id="period" class="mute"></p>
+      <div class="stats" id="stats"></div>
+      <p id="notes" class="mute"></p>
+    </div>
+    <div class="card"><h2>Review checklist — things to resolve</h2><div class="scroll"><table id="ck"></table></div></div>
+    <div class="card"><h2>Top items to look at first</h2><div class="scroll"><table id="top"></table></div></div>
+    <div class="card"><h2>Exceptions by check</h2><div class="scroll"><table id="bychk"></table></div></div>
+  </div>
+</div>
+<script src="vendor/exceljs.min.js"></script>
+<script src="app.bundle.js"></script>
+<script>window.addEventListener("load",function(){if(!window.__booksReady){document.getElementById("loaderr").classList.remove("hide")}})</script>
+</body>
+</html>

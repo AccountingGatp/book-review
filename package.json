@@ -1,0 +1,1 @@
+{"name":"books-review","private":true,"scripts":{"build":"esbuild app.js --bundle --format=iife --outfile=app.bundle.js --loader:.json=json --target=es2020"},"devDependencies":{"esbuild":"*"}}

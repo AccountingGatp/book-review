@@ -1,0 +1,641 @@
+{
+  "_readme": "Editable rule book. keyword_rules: if the regex matches the Name and/or Memo and the posted account is NOT in 'expected', the line is flagged and the first expected account is suggested. Add/adjust rules as you learn the client's habits - no code change needed.",
+  "thresholds": {
+    "high_amount": 5000,
+    "tiny_amount": 20,
+    "history_min_txns": 5,
+    "history_dominance": 0.8,
+    "history_min_txns_memo": 4,
+    "probable_dup_days": 3,
+    "probable_dup_min_amount": 20,
+    "outlier_min_txns": 6,
+    "outlier_multiple": 3.0,
+    "outlier_min_amount": 250,
+    "round_amount_min": 1000,
+    "memo_date_late_days": 20,
+    "pr_date_tolerance_days": 3,
+    "pay_period_tolerance_days": 45,
+    "journal_no_memo_min": 1000,
+    "near_dup_name_ratio": 0.9,
+    "cash_label_min_amount": 500,
+    "tolerance": 0.01
+  },
+  "suspense_accounts": [
+    "Other Expense",
+    "Other Income",
+    "Clearing Account",
+    "Opening Balance Equity",
+    "Payroll Receivable",
+    "Ask My Accountant",
+    "Uncategorized Expense",
+    "Uncategorized Income",
+    "Retainer"
+  ],
+  "placeholder_names": [
+    "Cash Withdrawals",
+    "Bank Charges",
+    "Wire Fee",
+    "Finance Charges",
+    "Cannabis",
+    "Credit Card Misc.",
+    "WooCommerce Customer",
+    "Trade show #1",
+    "Trade show #2"
+  ],
+  "similar_account_groups": [
+    {
+      "preferred": "Advertising and Promotion",
+      "also": [
+        "Advertising"
+      ],
+      "note": "Two advertising accounts (Advertising and Promotion vs Marketing:Advertising)."
+    },
+    {
+      "preferred": "Merchant Account Fees",
+      "also": [
+        "Merchant Fees"
+      ],
+      "note": "Card-processor fees are booked in 2-3 different accounts."
+    },
+    {
+      "preferred": "Software & Subscriptions",
+      "also": [
+        "Dues and Subscriptions",
+        "Computer and Internet Expenses"
+      ],
+      "note": "Software/subscription spend split across three accounts."
+    },
+    {
+      "preferred": "Utilities",
+      "also": [
+        "Electricity and water supply"
+      ],
+      "note": "Utilities split across two accounts."
+    },
+    {
+      "preferred": "Freight Costs",
+      "also": [
+        "Cost of Shipping & Freight"
+      ],
+      "note": "Two freight accounts."
+    },
+    {
+      "preferred": "Rental Income",
+      "also": [
+        "Lease/Rental Income"
+      ],
+      "note": "Two rental-income accounts (one is Other Income)."
+    }
+  ],
+  "keyword_rules": [
+    {
+      "id": "broker_commission",
+      "scope": "memo",
+      "pattern": "commission",
+      "expected": [
+        "Commissions"
+      ],
+      "severity": "Low",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Commission memo."
+    },
+    {
+      "id": "hardware_store",
+      "scope": "name",
+      "pattern": "harbor freight|home depot|lowe'?s|ace hardware",
+      "expected": [
+        "Repairs and Maintenance",
+        "Facility Supplies",
+        "Office Supplies"
+      ],
+      "severity": "Medium",
+      "note": "Hardware-store purchase (watch for 'Freight' in the name being mapped to Freight Costs)."
+    },
+    {
+      "id": "fuel",
+      "scope": "both",
+      "pattern": "\\b(shell (oil|service)|chevron|arco|76|ralphs? fuel|ralph's fuel|grand petroleum|gm oil|exxon|mobil|texaco|valero|circle k)\\b|\\bfuel\\b",
+      "expected": [
+        "Auto and Truck Expenses"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Fuel purchase."
+    },
+    {
+      "id": "auto_loan_mercedes",
+      "scope": "both",
+      "pattern": "mbfs|mercedes[- ]benz",
+      "expected": [
+        "Auto Loan - Mercedes",
+        "Auto and Truck Expenses",
+        "Interest Expense"
+      ],
+      "severity": "High",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Mercedes-Benz Financial payment: should reduce the Mercedes loan (and interest), not bank fees/expenses."
+    },
+    {
+      "id": "auto_loan_other",
+      "scope": "both",
+      "pattern": "gm financial|ally servicing|td auto|ford credit|ford motor credit|toyota financial",
+      "expected": [
+        "TD Auto Finance Loan",
+        "Ford Van Loan",
+        "Auto Loan",
+        "Auto Loan - Mercedes",
+        "Interest Expense",
+        "Auto and Truck Expenses"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Vehicle finance payment."
+    },
+    {
+      "id": "auto_misc",
+      "scope": "both",
+      "pattern": "\\b(dmv|autozone|american tire|car wash|truck wash|oil co|galpin)\\b",
+      "expected": [
+        "Auto and Truck Expenses"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Vehicle-related vendor."
+    },
+    {
+      "id": "airfare",
+      "scope": "both",
+      "pattern": "airlines?\\b|american air|alaska air|\\bdelta\\b|southwest|jetblue|united air|spirit air|british air",
+      "expected": [
+        "Travel - Airfare"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Airline."
+    },
+    {
+      "id": "lodging",
+      "scope": "both",
+      "pattern": "airbnb|hotel|marriott|hilton|hyatt|motel",
+      "expected": [
+        "Travel - Lodging"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Lodging."
+    },
+    {
+      "id": "rideshare",
+      "scope": "both",
+      "pattern": "\\buber\\b(?!\\s*\\*?\\s*eats)(?!\\.com)|lyft|taxi|\\bcab\\b|curb ",
+      "expected": [
+        "Travel - Transportation",
+        "Auto and Truck Expenses"
+      ],
+      "severity": "Low",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Ride-share / taxi."
+    },
+    {
+      "id": "meals",
+      "scope": "both",
+      "pattern": "doordash|uber ?\\*? ?eats|grubhub|starbucks|mcdonald|in-?n-?out|burger|pizza|restaurant|cafe|coffee|donut|el pollo|taco|chipotle|snack|7-?eleven|food4less|cardenas|cipriani",
+      "expected": [
+        "Meals and Entertainment",
+        "Facility Supplies",
+        "Office Supplies",
+        "Travel - Transportation"
+      ],
+      "severity": "Low",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Food/restaurant spend."
+    },
+    {
+      "id": "software",
+      "scope": "both",
+      "pattern": "hubspot|asana|age ?checker|ringcentral|microsoft|google|zoom|slack|dropbox|adobe|canva|quickbooks|intuit|fishbowl|amazon prime|shopify|godaddy|ring\\.com|ring multi",
+      "expected": [
+        "Software & Subscriptions",
+        "Dues and Subscriptions",
+        "Computer and Internet Expenses"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Software / SaaS subscription."
+    },
+    {
+      "id": "shipping",
+      "scope": "both",
+      "pattern": "\\bups\\b|fedex|\\bdhl\\b|usps|priority-?1|shippo|shipping fee|freight(?! tool)|landed cost",
+      "expected": [
+        "Freight Costs",
+        "Cost of Shipping & Freight",
+        "Shipping and Delivery Income",
+        "Inventory Asset",
+        "Cost of Goods Sold"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal"
+      ],
+      "note": "Shipping / freight."
+    },
+    {
+      "id": "bank_fees",
+      "scope": "memo",
+      "pattern": "wire (transfer )?fee|service charge|overdraft|digital banking fee|paper statement fee|account analysis|international purchase transaction fee|monthly maintenance",
+      "expected": [
+        "Bank Service Charges",
+        "Merchant Account Fees",
+        "Merchant Fees"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Bank fee."
+    },
+    {
+      "id": "bank_fee_names",
+      "scope": "name",
+      "pattern": "^(bank charges|wire fee)$",
+      "expected": [
+        "Bank Service Charges"
+      ],
+      "severity": "Medium",
+      "note": "Bank-fee placeholder vendor."
+    },
+    {
+      "id": "merchant_processor",
+      "scope": "both",
+      "pattern": "greenlight|authnet|authorize\\.?net|stripe|merchant svc|merchant service",
+      "expected": [
+        "Merchant Account Fees",
+        "Merchant Fees",
+        "Undeposited Funds",
+        "Accounts Receivable",
+        "Customer Deposit",
+        "Retail Products",
+        "Fulfillment Services",
+        "Clearing Account"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Card processor: fees go to merchant fees; deposits are sales/clearing - never Bank Service Charges or Other Income."
+    },
+    {
+      "id": "finance_charge",
+      "scope": "both",
+      "pattern": "finance charge|interest charge|purchase interest|interest paid",
+      "expected": [
+        "Interest Expense"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal",
+        "Invoice"
+      ],
+      "note": "Finance/interest charges belong in Interest Expense."
+    },
+    {
+      "id": "payroll_words",
+      "scope": "both",
+      "pattern": "pay period|payroll|pr check date|direct deposit employees|gusto",
+      "expected": [
+        "Payroll",
+        "Payroll Tax",
+        "Payroll Fees",
+        "Payroll Liabilities",
+        "Reimbursements",
+        "WC Insurance",
+        "Payroll Receivable",
+        "Independent Contractor - Other",
+        "Manufacturing Labor",
+        "Accounts Receivable"
+      ],
+      "severity": "High",
+      "types": [
+        "General Journal",
+        "Check",
+        "Bill",
+        "Credit Card Charge",
+        "Deposit",
+        "Credit"
+      ],
+      "note": "Payroll-related memo posted to a non-payroll account."
+    },
+    {
+      "id": "rent",
+      "scope": "both",
+      "pattern": "carver commercial|\\brent\\b",
+      "expected": [
+        "Rent Expense",
+        "Rental Income",
+        "Lease/Rental Income",
+        "Security Deposit"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Rent."
+    },
+    {
+      "id": "legal",
+      "scope": "both",
+      "pattern": "lawyer|law (office|firm|group)|attorney|\\besq\\b|\\blegal\\b",
+      "expected": [
+        "Legal",
+        "Professional Fees - Other"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Legal service provider."
+    },
+    {
+      "id": "accounting",
+      "scope": "both",
+      "pattern": "aetius|\\bcpa\\b|bookkeep|tax prep|accounting|accountant",
+      "expected": [
+        "Accounting/Bookkeeping/Tax Prep"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Accounting / tax preparation."
+    },
+    {
+      "id": "state_filings",
+      "scope": "both",
+      "pattern": "franchise tax|secretary of state|statement of information",
+      "expected": [
+        "Franchise Tax Expense",
+        "Other Expense",
+        "Professional Fees - Other"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "State filing / franchise tax."
+    },
+    {
+      "id": "sales_tax",
+      "scope": "both",
+      "pattern": "cdtfa|ca department|department of tax|sales tax",
+      "expected": [
+        "Sales Tax Payable"
+      ],
+      "severity": "Medium",
+      "note": "Sales-tax remittance."
+    },
+    {
+      "id": "insurance",
+      "scope": "both",
+      "pattern": "insurance|insurelinx|geico|workers comp",
+      "expected": [
+        "Insurance Expense",
+        "WC Insurance",
+        "Auto and Truck Expenses",
+        "FIRST Insurance Funding Loan",
+        "Vendor Deposit",
+        "Payroll Liabilities",
+        "Payroll Receivable",
+        "Accounts Payable"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice",
+        "General Journal"
+      ],
+      "note": "Insurance."
+    },
+    {
+      "id": "advertising",
+      "scope": "both",
+      "pattern": "facebook|meta ads|instagram|tiktok|google ads|linkedin|reddit",
+      "expected": [
+        "Advertising and Promotion",
+        "Advertising",
+        "Social Media & Content",
+        "Event Marketing",
+        "Sales Collateral",
+        "Web/Graphic Design Expense"
+      ],
+      "severity": "Medium",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Advertising platform."
+    },
+    {
+      "id": "web_design",
+      "scope": "both",
+      "pattern": "digicoal|web design|graphic design",
+      "expected": [
+        "Web/Graphic Design Expense",
+        "Social Media & Content",
+        "Sales Collateral",
+        "Software & Subscriptions"
+      ],
+      "severity": "Low",
+      "types_exclude": [
+        "Invoice"
+      ],
+      "note": "Design / web vendor."
+    },
+    {
+      "id": "utilities",
+      "scope": "both",
+      "pattern": "ladwp|edison|socal gas|southern california gas|spectrum|at&t|verizon|t-mobile|electric",
+      "expected": [
+        "Utilities",
+        "Electricity and water supply",
+        "Computer and Internet Expenses"
+      ],
+      "severity": "Low",
+      "types_exclude": [
+        "Invoice",
+        "General Journal"
+      ],
+      "note": "Utility / telecom."
+    },
+    {
+      "id": "invoice_shipping",
+      "scope": "memo",
+      "pattern": "^shipping",
+      "expected": [
+        "Shipping and Delivery Income"
+      ],
+      "severity": "Medium",
+      "types": [
+        "Invoice",
+        "Credit Memo"
+      ],
+      "note": "Shipping charge on a sales document."
+    },
+    {
+      "id": "invoice_customer_deposit",
+      "scope": "memo",
+      "pattern": "customer deposit",
+      "expected": [
+        "Customer Deposit",
+        "Accounts Receivable"
+      ],
+      "severity": "Medium",
+      "types": [
+        "Invoice",
+        "Credit Memo"
+      ],
+      "note": "Customer deposit line."
+    },
+    {
+      "id": "invoice_fulfillment",
+      "scope": "memo",
+      "pattern": "service fee|customer support|club house hours|employer'?s tax|total pay|employee tax",
+      "expected": [
+        "Fulfillment Services",
+        "Accounts Receivable"
+      ],
+      "severity": "Medium",
+      "types": [
+        "Invoice",
+        "Credit Memo"
+      ],
+      "note": "Fulfilment / service-fee line."
+    },
+    {
+      "id": "invoice_rental",
+      "scope": "memo",
+      "pattern": "rental +expense reimbursement",
+      "expected": [
+        "Rental Income",
+        "Accounts Receivable"
+      ],
+      "severity": "Medium",
+      "types": [
+        "Invoice",
+        "Credit Memo"
+      ],
+      "note": "Rent reimbursement."
+    },
+    {
+      "id": "invoice_parts",
+      "scope": "memo",
+      "pattern": "capcover|band-sticker|filter-?mesh",
+      "expected": [
+        "Inventory Part Income",
+        "Accounts Receivable"
+      ],
+      "severity": "Medium",
+      "types": [
+        "Invoice",
+        "Credit Memo"
+      ],
+      "note": "Parts / accessories sale."
+    },
+    {
+      "id": "cash_expensed",
+      "scope": "both",
+      "pattern": "teller cashed check|cash withdrawal|teller [a-z0-9]+ +brn",
+      "action": "review",
+      "review_account_types": [
+        "Expense",
+        "COGS"
+      ],
+      "min_amount": 500,
+      "severity": "Medium",
+      "types_exclude": [
+        "General Journal"
+      ],
+      "note": "Bank cash withdrawal expensed straight to labor/expense: payee unknown. Needs support (who was paid, 1099/payroll compliance)."
+    }
+  ],
+  "related_parties": {
+    "auto_detect": true,
+    "names": [
+      "LXP",
+      "Crysp",
+      "Bravura"
+    ]
+  },
+  "allocation_rules": [
+    {
+      "worker": "Mona",
+      "memo_pattern": "\\bmona",
+      "allowed_entities": [
+        "Crysp",
+        "LXP"
+      ],
+      "note": "Mona's Upwork hours are split between Crysp and LXP."
+    },
+    {
+      "worker": "Catie",
+      "memo_pattern": "\\bcatie",
+      "allowed_entities": [
+        "LXP"
+      ],
+      "note": "Catie's Upwork hours go to LXP only."
+    },
+    {
+      "worker": "Chelsey",
+      "memo_pattern": "\\bchelsey",
+      "allowed_entities": [
+        "LXP"
+      ],
+      "note": "Chelsey's Upwork hours go to LXP only."
+    }
+  ],
+  "upwork": {
+    "charge_memo_pattern": "upwork",
+    "tolerance_pct": 0.05,
+    "split_drift_points": 15
+  },
+  "approved_vendor_accounts": {
+    "Kimberly Marrder": [
+      "Social Media & Content"
+    ]
+  },
+  "review_notes": [
+    {
+      "name": "Carter",
+      "message": "Carter (lawyer) - confirm treatment with the accountant; pending item, does not block the review.",
+      "where": "Name Audit"
+    }
+  ]
+}
