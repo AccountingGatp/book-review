@@ -1,5 +1,5 @@
 {
-  "_readme": "Editable rule book. keyword_rules: if the regex matches the Name and/or Memo and the posted account is NOT in 'expected', the line is flagged and the first expected account is suggested. Add/adjust rules as you learn the client's habits - no code change needed.",
+  "_readme": "Editable rule book. keyword_rules: if the regex matches the Name and/or Memo and the posted account is NOT in 'expected', the line is flagged and the first expected account is suggested. Add/adjust rules as you learn the client's habits - no code change needed. Everything company-specific lives in this file: accounts, patterns, file_patterns, thresholds, netting, routine, review, upwork, related_parties, allocation_rules, keyword_rules (with optional checklist text).",
   "thresholds": {
     "high_amount": 5000,
     "tiny_amount": 20,
@@ -141,7 +141,12 @@
       "types_exclude": [
         "Invoice"
       ],
-      "note": "Mercedes-Benz Financial payment: should reduce the Mercedes loan (and interest), not bank fees/expenses."
+      "note": "Mercedes-Benz Financial payment: should reduce the Mercedes loan (and interest), not bank fees/expenses.",
+      "checklist": {
+        "area": "Account",
+        "text": "Mercedes-Benz Financial payments posted to Bank Service Charges - should reduce the Mercedes loan",
+        "where": "Exceptions: Check B1"
+      }
     },
     {
       "id": "auto_loan_other",
@@ -313,7 +318,12 @@
         "General Journal",
         "Invoice"
       ],
-      "note": "Card processor: fees go to merchant fees; deposits are sales/clearing - never Bank Service Charges or Other Income."
+      "note": "Card processor: fees go to merchant fees; deposits are sales/clearing - never Bank Service Charges or Other Income.",
+      "checklist": {
+        "area": "Account",
+        "text": "Card-processor (Greenlight) deposits/fees in Other Income or Bank Service Charges",
+        "where": "Exceptions: Check B1"
+      }
     },
     {
       "id": "finance_charge",
@@ -327,7 +337,12 @@
         "General Journal",
         "Invoice"
       ],
-      "note": "Finance/interest charges belong in Interest Expense."
+      "note": "Finance/interest charges belong in Interest Expense.",
+      "checklist": {
+        "area": "Account",
+        "text": "Card finance charges posted to Bank Service Charges - should be Interest Expense",
+        "where": "Exceptions: Check B1"
+      }
     },
     {
       "id": "payroll_words",
@@ -354,7 +369,12 @@
         "Deposit",
         "Credit"
       ],
-      "note": "Payroll-related memo posted to a non-payroll account."
+      "note": "Payroll-related memo posted to a non-payroll account.",
+      "checklist": {
+        "area": "Account",
+        "text": "Payroll journals ('Direct deposit employees') posted to Commissions - highlight and reclassify",
+        "where": "Exceptions: Check B1"
+      }
     },
     {
       "id": "rent",
@@ -583,7 +603,15 @@
       "types_exclude": [
         "General Journal"
       ],
-      "note": "Bank cash withdrawal expensed straight to labor/expense: payee unknown. Needs support (who was paid, 1099/payroll compliance)."
+      "note": "Bank cash withdrawal expensed straight to labor/expense: payee unknown. Needs support (who was paid, 1099/payroll compliance).",
+      "checklist": {
+        "area": "Support",
+        "text": "Cash withdrawals expensed to labor with no identified payee (1099/payroll support)",
+        "where": "Tab 'Cash & 1099'"
+      },
+      "names": [
+        "Cash Withdrawals"
+      ]
     }
   ],
   "related_parties": {
@@ -624,7 +652,8 @@
   "upwork": {
     "charge_memo_pattern": "upwork",
     "tolerance_pct": 0.05,
-    "split_drift_points": 15
+    "split_drift_points": 15,
+    "label": "Upwork"
   },
   "approved_vendor_accounts": {
     "Kimberly Marrder": [
@@ -637,5 +666,107 @@
       "message": "Carter (lawyer) - confirm treatment with the accountant; pending item, does not block the review.",
       "where": "Name Audit"
     }
-  ]
+  ],
+  "netting": {
+    "enabled": true,
+    "max_days": 62
+  },
+  "routine": {
+    "enabled": true,
+    "min_count": 4,
+    "min_share": 0.9,
+    "suppress_checks": [
+      "A1",
+      "B1",
+      "B4",
+      "B6",
+      "C2",
+      "C3",
+      "E2"
+    ],
+    "repeat_pattern_min_dates": 3,
+    "repeat_vendor_min_dates": 5,
+    "protected_rule_ids": [
+      "auto_loan_mercedes",
+      "finance_charge",
+      "payroll_words",
+      "merchant_processor",
+      "cash_expensed"
+    ],
+    "recurring_min_months": 3
+  },
+  "review": {
+    "a1_min_amount": 0,
+    "e1_min_amount": 1000,
+    "e1_min_multiple": 5,
+    "dup_min_amount": 5,
+    "small_floor": 25,
+    "check_priority": [
+      "B1",
+      "C3",
+      "B2",
+      "B5",
+      "D3",
+      "D1",
+      "D2",
+      "E7",
+      "G1",
+      "G2",
+      "G3",
+      "B3",
+      "E4",
+      "E1",
+      "A1",
+      "C2",
+      "C5",
+      "B4",
+      "B6",
+      "A2",
+      "E2",
+      "E5",
+      "C1",
+      "C4",
+      "E6"
+    ],
+    "group_checks": {
+      "A1": "Name Review",
+      "B5": "Account Review"
+    }
+  },
+  "accounts": {
+    "undeposited_funds": "Undeposited Funds",
+    "ar_control": "Accounts Receivable",
+    "ap_control": "Accounts Payable",
+    "petty_cash_split": "Cash Account",
+    "low_value_accounts": [
+      "Bank Service Charges",
+      "Interest Expense",
+      "Other Expense",
+      "Other Income",
+      "Credit Card Cash Rewards"
+    ]
+  },
+  "patterns": {
+    "bank_feed_memo": "(purchase|pos sig|pos deb|visa|checkcard|\\*)",
+    "purchase_date_memo": "(?:purchase|pos sig|pos deb|checkcard)\\s+(\\d{2})\\/(\\d{2})\\b",
+    "payroll_check_date_memo": "PR check date\\s+(\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}\\/\\d{4})",
+    "related_to_from": "^to\\/from\\s+(.+)$",
+    "related_card": "^(.+?)\\s+card$"
+  },
+  "file_patterns": {
+    "td": "tract?(s|i)?ional|transaction.*detail|trans.*by.*acc",
+    "gl": "general ledger",
+    "pl": "p\\s*(and|&)\\s*l|profit.*loss",
+    "bs": "balance sheet",
+    "tb": "trial balance",
+    "ar": "\\bar\\b.*report|a\\/r|receivable",
+    "ap": "\\bap\\b.*report|a\\/p|payable"
+  },
+  "rule_learning": {
+    "enabled": true,
+    "min_lines": 5,
+    "min_share": 0.8
+  },
+  "approved_memo": [],
+  "approved_pairs": []
 }

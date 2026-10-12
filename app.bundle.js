@@ -1,5 +1,6 @@
 (() => {
   // src/engine.js
+  var VERSION = "v6 (To Review list, 2026-10-12)";
   var SEV_RANK = { High: 3, Medium: 2, Low: 1, Info: 0 };
   var RANK_SEV = { 3: "High", 2: "Medium", 1: "Low", 0: "Info" };
   var VENDOR_TYPES = /* @__PURE__ */ new Set(["Check", "Credit Card Charge", "Bill", "Credit", "Credit Card Credit", "Item Receipt", "Bill Pmt -Check"]);
@@ -1383,16 +1384,18 @@
         if (SEV_RANK[p.severity] < 2) continue;
         const code = p.check.slice(0, 2);
         const who = p.name ? normName(p.name) : memoK(p.memo);
-        let key = [code, who, p.account].join("|");
+        const bulkTab = ((this.rules.review || {}).group_checks || {})[code];
+        let key = bulkTab ? "ALL|" + code : [who, String(p.account || "").split(" > ")[0]].join("|");
         if (code[0] === "D") key += "|" + isoDate(p.date) + "|" + Math.round(Math.abs(p.amount) * 100);
         let g = groups.get(key);
         if (!g) {
-          g = { memo_key: nz(p.memo).toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/[^a-z#]+/g, " ").replace(/(#\s*)+/g, "# ").trim().slice(0, 40), severity: p.severity, check: p.check, action: p.issue, detail: p.detail, name: p.name || "", account: p.account, suggested_account: p.suggested_account || "", suggested_name: p.suggested_name || "", lines: 0, total: 0, dates: [], example_memo: nz(p.memo), also: /* @__PURE__ */ new Set(), refs: [], line_ids: [] };
+          g = { bulk: bulkTab || "", memo_key: nz(p.memo).toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/[^a-z#]+/g, " ").replace(/(#\s*)+/g, "# ").trim().slice(0, 40), severity: p.severity, check: p.check, action: p.issue, detail: p.detail, name: p.name || "", account: p.account, suggested_account: p.suggested_account || "", suggested_name: p.suggested_name || "", lines: 0, total: 0, dates: [], example_memo: nz(p.memo), also: /* @__PURE__ */ new Set(), refs: [], line_ids: [] };
           groups.set(key, g);
         }
         if (SEV_RANK[p.severity] > SEV_RANK[g.severity]) g.severity = p.severity;
         g.lines++;
         g.total += p.amount || 0;
+        g.absTotal = (g.absTotal || 0) + Math.abs(p.amount || 0);
         g.dates.push(p.date);
         g.refs.push(p.source);
         g.line_ids.push(id);
@@ -1401,6 +1404,10 @@
       const q = [];
       for (const g of groups.values()) {
         g.dates.sort((a, b) => a - b);
+        if (g.bulk) {
+          q.push({ severity: g.severity, check: g.check, what_to_do: `${g.lines} lines: ${g.action}. Work through the "${g.bulk}" tab - each line shows a suggested name or account where the description gives a clue.`, name: "", account: "", suggested_account: "", suggested_name: "", lines: g.lines, total: g.absTotal, first: g.dates[0], last: g.dates[g.dates.length - 1], example_memo: g.example_memo, memo_key: "", also_flagged: [...g.also].sort().join("; "), where: `Tab: ${g.bulk}`, line_ids: g.line_ids, bulk: true });
+          continue;
+        }
         q.push({ severity: g.severity, check: g.check, what_to_do: g.action + (g.detail && g.lines === 1 ? " - " + g.detail : ""), name: g.name, account: g.account, suggested_account: g.suggested_account, suggested_name: g.suggested_name, lines: g.lines, total: g.total, first: g.dates[0], last: g.dates[g.dates.length - 1], example_memo: g.example_memo, memo_key: g.memo_key, also_flagged: [...g.also].sort().join("; "), where: g.refs.slice(0, 6).join(", ") + (g.refs.length > 6 ? ` (+${g.refs.length - 6} more)` : ""), line_ids: g.line_ids });
       }
       for (const f of account) q.push({ severity: f.severity, check: f.check, what_to_do: f.issue + (f.detail ? " - " + f.detail : ""), name: f.name || "", account: f.account || "", suggested_account: "", suggested_name: "", lines: 0, total: f.amount || 0, first: null, last: null, example_memo: "", also_flagged: "", where: f.source || "", line_ids: [] });
@@ -2308,7 +2315,7 @@
     put(1, 0, `Period reviewed: ${isoDate(rv.period[0])} to ${isoDate(rv.period[1])}   |   Lines reviewed: ${fmtN(lines)} (${fmtN(checked)} account-side lines checked)`);
     const now = /* @__PURE__ */ new Date();
     const p2 = (n) => String(n).padStart(2, "0");
-    put(2, 0, `Generated ${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}   |   Rules: ${rulesName}`);
+    put(2, 0, `Generated ${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}   |   Rules: ${rulesName}   |   Engine ${VERSION}`);
     put(3, 0, `ITEMS TO REVIEW: ${(rv.queue || []).length}  (${(rv.queue || []).filter((x) => x.severity === "High").length} high) - work from the 'To Review' tab only; the other tabs are supporting detail.`, (c) => {
       c.font = { bold: true, color: { argb: "FFC00000" } };
     });
@@ -3272,7 +3279,11 @@
         "C1",
         "C4",
         "E6"
-      ]
+      ],
+      group_checks: {
+        A1: "Name Review",
+        B5: "Account Review"
+      }
     },
     accounts: {
       undeposited_funds: "Undeposited Funds",
@@ -3592,5 +3603,7 @@
     a.download = `${c}_Review_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.xlsx`;
     a.click();
   };
+  var verEl = document.getElementById("ver");
+  if (verEl) verEl.textContent = "Engine " + VERSION;
   window.__booksReady = true;
 })();

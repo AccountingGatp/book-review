@@ -1,6 +1,6 @@
 // Port of build_outputs(): builds the Excel review workbook with ExcelJS and the summary object used by the web UI.
 // ExcelJS is resolved from opts.ExcelJS, then globalThis.ExcelJS (browser vendor build), then the npm package (Node).
-import { SEV_RANK, RANK_SEV, pyTitle, isoDate, npRound, npSum, nz } from './engine.js';
+import { VERSION, SEV_RANK, RANK_SEV, pyTitle, isoDate, npRound, npSum, nz } from './engine.js';
 
 let _ExcelJS = globalThis.ExcelJS || null;
 
@@ -118,7 +118,8 @@ export function buildReport(rv, opts = {}) {
   put(0, 0, `Books Review - ${company || 'Exceptions Report'}`, c => { c.font = { bold: true, size: 16 }; });
   put(1, 0, `Period reviewed: ${isoDate(rv.period[0])} to ${isoDate(rv.period[1])}   |   Lines reviewed: ${fmtN(lines)} (${fmtN(checked)} account-side lines checked)`);
   const now = new Date(); const p2 = n => String(n).padStart(2, '0');
-  put(2, 0, `Generated ${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}   |   Rules: ${rulesName}`);
+  put(2, 0, `Generated ${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}   |   Rules: ${rulesName}   |   Engine ${VERSION}`);
+  put(3, 0, `ITEMS TO REVIEW: ${(rv.queue || []).length}  (${(rv.queue || []).filter(x => x.severity === 'High').length} high) - work from the 'To Review' tab only; the other tabs are supporting detail.`, c => { c.font = { bold: true, color: { argb: 'FFC00000' } }; });
   const r0 = 5;
   put(r0, 0, 'Exceptions by severity', bold);
   const sevCount = {}; for (const s of SEVS) sevCount[s] = fl.filter(f => f.severity === s).length;
@@ -156,20 +157,28 @@ export function buildReport(rv, opts = {}) {
   const rgKeys = [...rg.keys()].sort(cmpv);
   rgKeys.forEach((k, i) => { put(r2 + 2 + i, 0, k); put(r2 + 2 + i, 1, rg.get(k).items); put(r2 + 2 + i, 2, rg.get(k).bad); });
   const r3 = r2 + 4 + rgKeys.length;
-  put(r3, 0, 'Top 15 items to look at first', bold);
-  ['Ref', 'Severity', 'Date', 'Name', 'Amount', 'Issue'].forEach((h, j) => put(r3 + 1, j, h, styleHeader));
-  lineFl.slice(0, 15).forEach((x, i) => {
-    put(r3 + 2 + i, 0, x.ref); put(r3 + 2 + i, 1, x.severity, sevStyle(x.severity));
-    put(r3 + 2 + i, 2, x.date ? isoDate(x.date) : ''); put(r3 + 2 + i, 3, nz(x.name));
-    put(r3 + 2 + i, 4, x.amount, c => { c.numFmt = NUMFMT; }); put(r3 + 2 + i, 5, x.issue);
+  put(r3, 0, 'Top 15 items to look at first (full list: To Review tab)', bold);
+  ['Item', 'Severity', 'Lines', 'Name', 'Amount', 'What to do'].forEach((h, j) => put(r3 + 1, j, h, styleHeader));
+  const queue = rv.queue || [];
+  queue.slice(0, 15).forEach((x, i) => {
+    put(r3 + 2 + i, 0, x.item); put(r3 + 2 + i, 1, x.severity, sevStyle(x.severity));
+    put(r3 + 2 + i, 2, x.lines || ''); put(r3 + 2 + i, 3, nz(x.name));
+    put(r3 + 2 + i, 4, x.total, c => { c.numFmt = NUMFMT; }); put(r3 + 2 + i, 5, x.what_to_do.slice(0, 160));
   });
   const r4 = r3 + 19;
   put(r4, 0, 'Notes & limits', bold);
   const notes = [...rv.notes,
     'Account/name suggestions are rule- and history-based. They are leads for a human reviewer, not automatic corrections.',
-    'Reviewer columns (Action / Notes) on the Exceptions tab are blank for you to fill in.',
+    'Work from the To Review tab. Account Review / Name Review / Duplicates / Unusual show only High and Medium lines; Low and Info (optional) flags are only on the Exceptions tab.',
     "'Funding side' lines (bank, credit card, A/R, A/P, undeposited funds) are not categorised; they are checked via duplicates and reconciliations."];
   notes.forEach((n, i) => put(r4 + 1 + i, 0, n));
+
+  // ---------------- To Review (one row per decision)
+  const qCols = ['item', 'severity', 'check', 'what_to_do', 'name', 'account', 'suggested_account', 'lines', 'total', 'first', 'last', 'example_memo', 'also_flagged', 'where', 'reviewer_action', 'reviewer_notes'];
+  const qRows = (rv.queue || []).map(x => qCols.map(c => (c === 'reviewer_action' || c === 'reviewer_notes' ? null : (c === 'total' ? x.total : cellOrBlank(x[c])))));
+  const qws = addSheet(wb, 'To Review', qCols, qRows, { widths: { what_to_do: 70, name: 26, account: 30, suggested_account: 26, example_memo: 46, also_flagged: 24, where: 34, reviewer_action: 18, reviewer_notes: 30 }, sev: true });
+  if (qRows.length) qws.dataValidations.add(`O2:O${qRows.length + 1}`, { type: 'list', allowBlank: true, formulae: ['"Fixed,Accepted as is,Ask client,Needs support"'] });
+  wb.worksheets.splice(wb.worksheets.indexOf(qws), 1); wb.worksheets.splice(1, 0, qws);
 
   // ---------------- Exceptions + theme tabs
   const exCols = ['ref', 'severity', 'check', 'issue', 'detail', 'date', 'type', 'num', 'name', 'memo', 'account', 'cls', 'amount', 'split', 'suggested_account', 'suggested_name', 'confidence', 'source', 'reviewer_action', 'reviewer_notes'];
@@ -181,7 +190,7 @@ export function buildReport(rv, opts = {}) {
     Duplicates: ['D1', 'D2', 'D3'], Unusual: ['A2', 'E1', 'E2', 'E4', 'E5', 'E6', 'E7'],
   };
   const ci = exCols.indexOf('check');
-  for (const [tab, pref] of Object.entries(themes)) addSheet(wb, tab, exCols, exRows.filter(r => pref.includes(r[ci].slice(0, 2))), { widths: exW, sev: true });
+  for (const [tab, pref] of Object.entries(themes)) addSheet(wb, tab, exCols, exRows.filter(r => pref.includes(r[ci].slice(0, 2)) && (r[1] === 'High' || r[1] === 'Medium')), { widths: exW, sev: true });
 
   // ---------------- Reconciliation
   const rcCols = ['check', 'item', 'expected', 'actual', 'difference', 'status', 'note'];
@@ -244,14 +253,22 @@ export function buildReport(rv, opts = {}) {
     ckWs.dataValidations.add(`F2:F${rv.checklist.length + 1}`, { type: 'list', allowBlank: true, formulae: ['"Open,In progress,Resolved,Accepted as is"'] });
   }
   const aCols = ['worker', 'month', 'entity', 'amount', 'share_of_worker_month', 'rule'];
-  addSheet(wb, 'Upwork Allocation', aCols, rv.alloc_rows.map(r => aCols.map(c => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
-  const uCols = ['month', 'upwork_charged', 'hours_billed', 'difference', 'status'];
-  addSheet(wb, 'Upwork Recharge', uCols, rv.recharge_rows.map(r => uCols.map(c => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
+  addSheet(wb, 'Allocation', aCols, rv.alloc_rows.map(r => aCols.map(c => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
+  const uCols = ['month', 'charged', 'hours_billed', 'difference', 'status'];
+  addSheet(wb, 'Recharge Check', uCols, rv.recharge_rows.map(r => uCols.map(c => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
   const cCols = ['date', 'amount', 'bank_memo', 'expensed_to', 'payee', 'form_1099', 'status'];
   addSheet(wb, 'Cash & 1099', cCols, rv.cash_rows.map(r => cCols.map(c => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
   const lgCols = ['step', 'status', 'message'];
   addSheet(wb, 'Run Log', lgCols, rv.run_log.map(r => lgCols.map(c => r[c])), { widths: { step: 40, message: 90 } });
   addSheet(wb, 'Related Parties', ['related_party', 'status'], [...rv.related].sort(cmpv).map(x => [x, 'In books']).concat((rv.new_related || []).map(x => [x, 'NEW - confirm and add to rules'])), { widths: { related_party: 40, status: 34 } });
+  const nCols = ['pair', 'name', 'account', 'amount', 'date_plus', 'date_minus', 'days_apart', 'memo_plus', 'memo_minus', 'flags_cleared'];
+  addSheet(wb, 'Netted Pairs', nCols, (rv.net_pairs || []).map((np, i) => [i + 1, np.pos.name, np.pos.account, Math.abs(np.pos.amount), np.pos.date, np.neg.date, np.gap, np.pos.memo, np.neg.memo, np.cleared || 0]), { widths: { name: 30, account: 34, memo_plus: 40, memo_minus: 40 } });
+  const rCols = ['basis', 'name', 'account', 'lines', 'first_used', 'last_used', 'min_amount', 'max_amount', 'flags_cleared'];
+  addSheet(wb, 'Routine Items', rCols, (rv.routine_rows || []).map(r => [r.basis, r.name, r.account, r.lines, r.first, r.last, r.min_amount, r.max_amount, r.flags_cleared]), { widths: { name: 32, account: 40 } });
+  const sCols = ['rule', 'what_it_checks', 'accounts_it_expects', 'status'];
+  addSheet(wb, 'Rules Not Applied', sCols, (rv.rules_skipped || []).map(r => [r.rule, r.note, r.expected, 'Skipped: none of these accounts exist in these books']), { widths: { what_it_checks: 50, accounts_it_expects: 60, status: 50 } });
+  const lCols = ['rule', 'what_it_checks', 'this_company_posts_to', 'lines', 'of_matching_lines', 'share', 'rule_expected', 'flags_cleared'];
+  addSheet(wb, 'Learned Rules', lCols, (rv.rule_learned || []).map(r => [r.rule, r.note, r.account, r.lines, r.of, r.share, r.expected, r.flags_cleared]), { widths: { what_it_checks: 50, this_company_posts_to: 34, rule_expected: 50 } });
   const kCols = ['checkpoint', 'date', 'type', 'num', 'name', 'memo', 'account', 'amount'];
   addSheet(wb, 'Checkpoints', kCols, (rv.checkpoint_rows || []).map(r => kCols.map(c => cellOrBlank(c === 'date' && r[c] ? r[c] : r[c]))), { widths: { memo: 50, account: 34, name: 28, checkpoint: 16 } });
   const rrCols = ['id', 'applies_to', 'pattern', 'expected_accounts', 'severity', 'note'];
@@ -261,6 +278,7 @@ export function buildReport(rv, opts = {}) {
   const by_check = pvKeys.map(k => { const v = pv.get(k); return { check: k, High: v.High, Medium: v.Medium, Low: v.Low, Info: v.Info, total: v.High + v.Medium + v.Low + v.Info }; });
   const summary = {
     total: fl.length,
+    queue: { items: queue.length, high: queue.filter(x => x.severity === 'High').length, medium: queue.filter(x => x.severity === 'Medium').length, lines: queue.reduce((a, x) => a + x.lines, 0), recon_items: queue.filter(x => x.recon).length, rows: queue.map(x => ({ memo_key: x.memo_key || '', item: x.item, sev: x.severity, check: x.check, what: x.what_to_do, name: x.name, account: x.account, suggested: x.suggested_account, lines: x.lines, total: x.total })) },
     severity: { High: sevCount.High, Medium: sevCount.Medium, Low: sevCount.Low, Info: sevCount.Info },
     recon_bad: reconBad,
     period: [isoDate(rv.period[0]), isoDate(rv.period[1])],
@@ -271,6 +289,10 @@ export function buildReport(rv, opts = {}) {
     top: lineFl.slice(0, 25).map(f => ({ ref: f.ref, sev: f.severity, date: f.date ? isoDate(f.date) : '', name: f.name || '', amount: f.amount, issue: f.issue })),
     notes: notes.slice(0, rv.notes.length),
     new_related: rv.new_related || [],
+    routine: { items: (rv.routine_rows || []).length, flags_cleared: rv.routine_cleared || 0, repeat_downgraded: rv.repeat_downgraded || 0 },
+    skipped_rules: (rv.rules_skipped || []).length,
+    learned: { rules: (rv.rule_learned || []).length, flags_cleared: rv.rule_learned_cleared || 0 },
+    netted: { pairs: (rv.net_pairs || []).length, lines: (rv.net_pairs || []).length * 2, flags_cleared: rv.net_flags_cleared || 0 },
     checkpoints: (rv.checkpoint_rows || []).map(r => ({ date: r.date ? isoDate(r.date) : '', type: r.type, name: r.name || '', memo: r.memo || '', account: r.account, amount: r.amount, checkpoint: r.checkpoint })),
     detected: opts.detected || null,
     coverage: Number.isNaN(cov) ? null : cov,

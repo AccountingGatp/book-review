@@ -67,7 +67,7 @@ details summary{cursor:pointer;color:var(--mute)}
     </div>
     <details style="margin-top:14px"><summary>Review rules (advanced) — edit related companies, allocation rules, approved vendors, keyword rules</summary>
       <textarea id="rules" spellcheck="false"></textarea>
-      <div class="row" style="margin-top:8px"><button id="rulesReset">Reset to default</button><span id="rulesMsg" class="mute"></span></div>
+      <div class="row" style="margin-top:8px"><button id="rulesReset">Reset to default</button> <button id="rulesDl">Download rules</button> <label class="mute">Load rules file <input id="rulesLoad" type="file" accept=".json"></label><span id="rulesMsg" class="mute"></span></div>
     </details>
   </div>
 
@@ -84,17 +84,18 @@ details summary{cursor:pointer;color:var(--mute)}
       <div class="stats" id="stats"></div>
       <p id="notes" class="mute"></p>
     </div>
+    <div class="card"><h2>Items to review - work from this list</h2><div class="scroll"><table id="top"></table></div></div>
     <div id="newrel" class="card hide"><h2>New related companies — please confirm</h2>
       <p class="mute">These companies appear in the books as related (To/From or card accounts) but are not on the confirmed list. Confirm to include them in the allocation and recharge checks; the choice is remembered on this computer.</p>
       <div id="newrelList"></div></div>
     <div id="ckpt" class="card hide"><h2>Checkpoints for review</h2><div class="scroll"><table id="ckptTable"></table></div></div>
     <div class="card"><h2>Review checklist — things to resolve</h2><div class="scroll"><table id="ck"></table></div></div>
-    <div class="card"><h2>Top items to look at first</h2><div class="scroll"><table id="top"></table></div></div>
     <div class="card"><h2>Exceptions by check</h2><div class="scroll"><table id="bychk"></table></div></div>
   </div>
 </div>
 <script src="vendor/exceljs.min.js"></script>
-<script src="app.bundle.js"></script>
+<script src="app.bundle.js?v=6"></script>
 <script>window.addEventListener("load",function(){if(!window.__booksReady){document.getElementById("loaderr").classList.remove("hide")}})</script>
+<p class="privacy" style="text-align:center;margin:18px 0">Files never leave this browser. <span id="ver"></span></p>
 </body>
 </html>
