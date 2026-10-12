@@ -169,7 +169,7 @@ export function buildReport(rv, opts = {}) {
   put(r4, 0, 'Notes & limits', bold);
   const notes = [...rv.notes,
     'Account/name suggestions are rule- and history-based. They are leads for a human reviewer, not automatic corrections.',
-    'Work from the To Review tab. Account Review / Name Review / Duplicates / Unusual show only High and Medium lines; Low and Info (optional) flags are only on the Exceptions tab.',
+    'Work from the To Review tab. Account Review / Name Review / Duplicates / Unusual show only High and Medium lines; Exceptions lists High and Medium lines, each tied to its To Review item; Low and Info (optional) flags are on the Optional Flags tab.',
     "'Funding side' lines (bank, credit card, A/R, A/P, undeposited funds) are not categorised; they are checked via duplicates and reconciliations."];
   notes.forEach((n, i) => put(r4 + 1 + i, 0, n));
 
@@ -181,16 +181,19 @@ export function buildReport(rv, opts = {}) {
   wb.worksheets.splice(wb.worksheets.indexOf(qws), 1); wb.worksheets.splice(1, 0, qws);
 
   // ---------------- Exceptions + theme tabs
-  const exCols = ['ref', 'severity', 'check', 'issue', 'detail', 'date', 'type', 'num', 'name', 'memo', 'account', 'cls', 'amount', 'split', 'suggested_account', 'suggested_name', 'confidence', 'source', 'reviewer_action', 'reviewer_notes'];
-  const exRows = fl.map(f => exCols.map(c => (c === 'reviewer_action' || c === 'reviewer_notes' ? null : cellOrBlank(f[c]))));
+  const itemOf = new Map(); for (const q of rv.queue || []) for (const id of q.line_ids || []) itemOf.set(id, q.item);
+  const exCols = ['ref', 'review_item', 'severity', 'check', 'issue', 'detail', 'date', 'type', 'num', 'name', 'memo', 'account', 'cls', 'amount', 'split', 'suggested_account', 'suggested_name', 'confidence', 'source', 'reviewer_action', 'reviewer_notes'];
+  const exRows = fl.map(f => exCols.map(c => (c === 'reviewer_action' || c === 'reviewer_notes' ? null : (c === 'review_item' ? (itemOf.get(f.line_id) || null) : cellOrBlank(f[c])))));
   const exW = { issue: 48, detail: 60, memo: 50, account: 28, name: 26, suggested_account: 26, suggested_name: 24 };
-  addSheet(wb, 'Exceptions', exCols, exRows, { widths: exW, sev: true });
+  const sevI = exCols.indexOf('severity');
+  addSheet(wb, 'Exceptions', exCols, exRows.filter(r => r[sevI] === 'High' || r[sevI] === 'Medium'), { widths: exW, sev: true });
+  addSheet(wb, 'Optional Flags', exCols, exRows.filter(r => r[sevI] === 'Low' || r[sevI] === 'Info'), { widths: exW, sev: true });
   const themes = {
     'Account Review': ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'C3'], 'Name Review': ['A1', 'C1', 'C2', 'C4', 'C5'],
     Duplicates: ['D1', 'D2', 'D3'], Unusual: ['A2', 'E1', 'E2', 'E4', 'E5', 'E6', 'E7'],
   };
   const ci = exCols.indexOf('check');
-  for (const [tab, pref] of Object.entries(themes)) addSheet(wb, tab, exCols, exRows.filter(r => pref.includes(r[ci].slice(0, 2)) && (r[1] === 'High' || r[1] === 'Medium')), { widths: exW, sev: true });
+  for (const [tab, pref] of Object.entries(themes)) addSheet(wb, tab, exCols, exRows.filter(r => pref.includes(r[ci].slice(0, 2)) && (r[2] === 'High' || r[2] === 'Medium')), { widths: exW, sev: true });
 
   // ---------------- Reconciliation
   const rcCols = ['check', 'item', 'expected', 'actual', 'difference', 'status', 'note'];

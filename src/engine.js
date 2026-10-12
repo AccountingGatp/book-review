@@ -1,7 +1,7 @@
 // Books Review engine - faithful JS port of review_books.py (no imports, runs in Node 22 and in Web Workers).
 // All inputs are already-read row arrays (see xlsx_io.js). All dates are JS Date objects at UTC midnight.
 
-export const VERSION = 'v6 (To Review list, 2026-10-12)';
+export const VERSION = 'v7 (Exceptions split, 2026-10-12)';
 export const SEV_RANK = { High: 3, Medium: 2, Low: 1, Info: 0 };
 export const RANK_SEV = { 3: 'High', 2: 'Medium', 1: 'Low', 0: 'Info' };
 

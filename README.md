@@ -56,4 +56,4 @@ If a setting is missing from the rules text on the page, the value from the bund
 ## v6
 - Rows are grouped per vendor + account family (not per check), so one vendor with several issues is one row.
 - Checks listed in `review.group_checks` (missing names `A1`, catch-all `B5`) are one row each that points to the tab to work through.
-- The page footer and the workbook Summary show the engine version. If you do not see "Engine v6", the site is serving old files: replace the whole folder and redeploy (index.html loads `app.bundle.js?v=6`).
+- The page footer and the workbook Summary show the engine version. If you do not see "Engine v7", the site is serving old files: replace the whole folder and redeploy (index.html loads `app.bundle.js?v=7`).
