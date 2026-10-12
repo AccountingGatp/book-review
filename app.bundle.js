@@ -489,7 +489,6 @@
   var REF_RE = /(?=[A-Z0-9*]*\d)(?=[A-Z0-9*]*[A-Z])[A-Z0-9*]{7,}/g;
   var findRefs = (s) => s ? s.match(REF_RE) || [] : [];
   var IGNORE_MEMO = /landed cost|vendor deposit|shipping - shipping fee|^FB:/i;
-  var BANKY = /(purchase|pos sig|pos deb|visa|checkcard|\*)/i;
   function merchantGuess(memo) {
     let m = nz(memo);
     m = m.replace(/^\s*(purchase|pos sig|pos deb|checkcard|recurring)\s*\d{0,2}\/?\d{0,2}\s*/i, "");
@@ -554,6 +553,25 @@
     return out;
   }
   var Review = class _Review {
+    /** Everything business-specific comes from the rules object. These accessors never invent values. */
+    get acct() {
+      return this.rules.accounts || {};
+    }
+    get pat() {
+      return this.rules.patterns || {};
+    }
+    rx(key, flags = "i") {
+      const p = this.pat[key];
+      return p ? pyRegex(p, flags) : null;
+    }
+    cashNames() {
+      const r = (this.rules.keyword_rules || []).find((x) => x.action === "review");
+      return new Set(r && r.names || []);
+    }
+    upworkRx() {
+      const u = this.rules.upwork;
+      return u && u.charge_memo_pattern ? pyRegex(u.charge_memo_pattern, "i") : null;
+    }
     constructor(rowsByRole, rules, payeeRows) {
       this.rowsByRole = rowsByRole;
       this.rules = rules;
@@ -623,7 +641,7 @@
         let at = this.type_map.get(l.leaf);
         if (at === void 0 || at === null) at = "Other";
         l.acct_type = at;
-        l.is_funding = FUND.has(at) || l.leaf === "Undeposited Funds";
+        l.is_funding = FUND.has(at) || !!this.acct.undeposited_funds && l.leaf === this.acct.undeposited_funds;
         l.id = i;
       });
       let lo = this.td[0].date, hi = this.td[0].date;
@@ -686,7 +704,7 @@
     // ---------------------------------------------------------------- A
     checkCompleteness() {
       const th = this.th;
-      const LOWLEAF = /* @__PURE__ */ new Set(["Bank Service Charges", "Interest Expense", "Other Expense", "Other Income", "Credit Card Cash Rewards"]);
+      const LOWLEAF = new Set(this.acct.low_value_accounts || []);
       for (const r of this.target) {
         if (r.type === "General Journal") {
           if (!r.memo && Math.abs(r.amount) >= th.journal_no_memo_min) this.flag(r, "A2 Missing memo", "Medium", "Manual journal with no description", "Journals must explain themselves.");
@@ -698,7 +716,7 @@
           let sugName;
           if (sug) sugName = sug[0];
           else {
-            const mg = BANKY.test(nz(r.memo)) ? merchantGuess(r.memo) : null;
+            const mg = (this.rx("bank_feed_memo") || /$^/).test(nz(r.memo)) ? merchantGuess(r.memo) : null;
             sugName = mg ? `(new?) ${mg}` : "";
           }
           this.flag(
@@ -782,10 +800,22 @@
     }
     checkKeywordRules() {
       const rules = this.rules.keyword_rules.map((ru) => ({ ...ru, _re: pyRegex(ru.pattern, "i") }));
+      this.rule_hits = /* @__PURE__ */ new Map();
+      const known = /* @__PURE__ */ new Set();
+      for (const l of this.td) {
+        known.add(l.leaf);
+        known.add(l.account);
+      }
+      this.rules_skipped = [];
+      for (const ru of rules) {
+        ru._skip = ru.action !== "review" && !(ru.expected || []).some((a) => known.has(a));
+        if (ru._skip) this.rules_skipped.push({ rule: ru.id, note: ru.note || "", expected: (ru.expected || []).slice(0, 3).join(", ") });
+      }
       for (const r of this.target) {
         const name = nz(r.name), memo = nz(r.memo);
         const matches = [];
         for (const ru of rules) {
+          if (ru._skip) continue;
           if ("types" in ru && !ru.types.includes(r.type)) continue;
           if ((ru.types_exclude || []).includes(r.type)) continue;
           const text = ru.scope === "name" ? name : ru.scope === "memo" ? memo : `${name} | ${memo}`;
@@ -803,6 +833,8 @@
           }
           const exp = ru.expected;
           const ok = exp.includes(r.leaf) || exp.includes(r.account);
+          if (!this.rule_hits.has(ru.id)) this.rule_hits.set(ru.id, []);
+          this.rule_hits.get(ru.id).push({ r, ok });
           if (ok) {
             this.rule_ok_ids.add(r.id);
             continue;
@@ -970,7 +1002,7 @@
           this.flag(r, "C1 Customer/vendor mix-up", "Medium", `Vendor name "${name}" used on a ${r.type}`, "This name only appears as a vendor elsewhere.", { conf: "Role" });
         }
         const memo = nz(r.memo);
-        if (["Check", "Credit Card Charge", "Deposit"].includes(r.type) && Array.from(memo).length >= 15 && BANKY.test(memo) && !ph.has(name)) {
+        if (["Check", "Credit Card Charge", "Deposit"].includes(r.type) && Array.from(memo).length >= 15 && (this.rx("bank_feed_memo") || /$^/).test(memo) && !ph.has(name)) {
           const nt = tokens(name);
           const mn = normName(memo);
           const mt = tokens(memo);
@@ -1085,8 +1117,312 @@
       }
     }
     // ---------------------------------------------------------------- D
+    /** A +X and a -X in the same account for the same name net to zero: they are not errors and not duplicates. */
+    computeNetPairs() {
+      const cfg = this.rules.netting || {};
+      this.net_pairs = [];
+      this.netted = /* @__PURE__ */ new Set();
+      this.net_flags_cleared = 0;
+      if (cfg.enabled === false) return;
+      const maxDays = cfg.max_days;
+      const groups = /* @__PURE__ */ new Map();
+      for (const r of this.target) {
+        if (!r.amount) continue;
+        const k = r.account + "|" + normName(r.name || "") + "|" + Math.round(Math.abs(r.amount) * 100);
+        let g = groups.get(k);
+        if (!g) {
+          g = { pos: [], neg: [] };
+          groups.set(k, g);
+        }
+        (r.amount > 0 ? g.pos : g.neg).push(r);
+      }
+      for (const g of groups.values()) {
+        if (!g.pos.length || !g.neg.length) continue;
+        const used = /* @__PURE__ */ new Set();
+        for (const p of g.pos.slice().sort((a, b) => a.date - b.date)) {
+          let best = -1, bestGap = Infinity;
+          g.neg.forEach((n, i) => {
+            if (used.has(i)) return;
+            const gap = Math.abs(dayDiff(n.date, p.date));
+            if (gap <= maxDays && gap < bestGap) {
+              best = i;
+              bestGap = gap;
+            }
+          });
+          if (best >= 0) {
+            used.add(best);
+            const n = g.neg[best];
+            this.net_pairs.push({ pos: p, neg: n, gap: bestGap });
+            this.netted.add(p.id);
+            this.netted.add(n.id);
+          }
+        }
+      }
+      const susp = new Set(this.rules.suspense_accounts || []);
+      const left = /* @__PURE__ */ new Map();
+      for (const r of this.target) {
+        if (!r.amount || this.netted.has(r.id)) continue;
+        const k = r.account + "|" + Math.round(Math.abs(r.amount) * 100);
+        let g = left.get(k);
+        if (!g) {
+          g = { pos: [], neg: [] };
+          left.set(k, g);
+        }
+        (r.amount > 0 ? g.pos : g.neg).push(r);
+      }
+      for (const g of left.values()) {
+        if (!g.pos.length || !g.neg.length) continue;
+        const used = /* @__PURE__ */ new Set();
+        for (const p of g.pos.slice().sort((a, b) => a.date - b.date)) {
+          let best = -1, bestGap = Infinity;
+          g.neg.forEach((n, i) => {
+            if (used.has(i)) return;
+            const ok = !p.name || !n.name || susp.has(p.account) || normName(p.name) === normName(n.name);
+            const gap = Math.abs(dayDiff(n.date, p.date));
+            if (ok && gap <= maxDays && gap < bestGap) {
+              best = i;
+              bestGap = gap;
+            }
+          });
+          if (best >= 0) {
+            used.add(best);
+            const n = g.neg[best];
+            this.net_pairs.push({ pos: p, neg: n, gap: bestGap, loose: true });
+            this.netted.add(p.id);
+            this.netted.add(n.id);
+          }
+        }
+      }
+      this.net_pairs.sort((a, b) => Math.abs(b.pos.amount) - Math.abs(a.pos.amount));
+    }
+    applyNetting() {
+      if (!this.netted || !this.netted.size) return;
+      const keep = /* @__PURE__ */ new Set(["D3", "G1", "G2", "G3", "B3", "E7"]);
+      const cleared = /* @__PURE__ */ new Map();
+      this.flags = this.flags.filter((f) => {
+        if (f.line_id < 0 || !this.netted.has(f.line_id) || keep.has(f.check.slice(0, 2))) return true;
+        cleared.set(f.line_id, (cleared.get(f.line_id) || 0) + 1);
+        return false;
+      });
+      for (const np of this.net_pairs) np.cleared = (cleared.get(np.pos.id) || 0) + (cleared.get(np.neg.id) || 0);
+      this.net_flags_cleared = [...cleared.values()].reduce((a, b) => a + b, 0);
+    }
+    /** Learn routine items from the file itself: same name always posted to the same account, repeatedly (rent, internet,
+     *  phone, gateway fees...). For those, the low-level hygiene flags are noise, so they are cleared and listed for audit. */
+    applyRoutine() {
+      const cfg = this.rules.routine || {};
+      this.routine_rows = [];
+      this.routine_cleared = 0;
+      if (cfg.enabled === false) return;
+      const minN = cfg.min_count, minShare = cfg.min_share;
+      const supp = new Set(cfg.suppress_checks || []);
+      const protectedRules = new Set(cfg.protected_rule_ids || []);
+      const ph = new Set(this.rules.placeholder_names || []);
+      const memoKey = (m) => {
+        const t = nz(m).toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/[^a-z#]+/g, " ").replace(/(#\s*)+/g, "# ").trim();
+        return t.length >= 6 ? t.slice(0, 40) : null;
+      };
+      const routine = /* @__PURE__ */ new Map();
+      const build = (keyFn, basis) => {
+        const total = /* @__PURE__ */ new Map(), pair = /* @__PURE__ */ new Map();
+        for (const r of this.target) {
+          const k = keyFn(r);
+          if (!k) continue;
+          total.set(k, (total.get(k) || 0) + 1);
+          const pk = k + "||" + r.leaf;
+          let g = pair.get(pk);
+          if (!g) {
+            g = { k, label: basis === "name" ? r.name : nz(r.memo), account: r.account, lines: [] };
+            pair.set(pk, g);
+          }
+          g.lines.push(r);
+        }
+        for (const g of pair.values()) {
+          if (g.lines.length < minN || g.lines.length / total.get(g.k) < minShare) continue;
+          const am = g.lines.map((l) => Math.abs(l.amount)).sort((x, y) => x - y);
+          const dates = g.lines.map((l) => l.date).sort((x, y) => x - y);
+          const row = { basis, name: g.label, account: g.account, lines: g.lines.length, first: dates[0], last: dates[dates.length - 1], min_amount: am[0], max_amount: am[am.length - 1], flags_cleared: 0 };
+          this.routine_rows.push(row);
+          for (const l of g.lines) if (!routine.has(l.id)) routine.set(l.id, row);
+        }
+      };
+      build((r) => r.name && !ph.has(r.name) ? normName(r.name) : null, "name");
+      build((r) => memoKey(r.memo), "memo");
+      {
+        const gm = /* @__PURE__ */ new Map(), minM = cfg.recurring_min_months;
+        for (const r of this.target) {
+          const k = memoKey(r.memo);
+          if (!k || !r.amount) continue;
+          const kk = k + "||" + r.leaf + "||" + Math.round(Math.abs(r.amount) * 100);
+          let g = gm.get(kk);
+          if (!g) {
+            g = { label: nz(r.memo), account: r.account, lines: [], months: /* @__PURE__ */ new Set() };
+            gm.set(kk, g);
+          }
+          g.lines.push(r);
+          g.months.add(ymKey(r.date));
+        }
+        for (const g of gm.values()) {
+          if (g.months.size < minM) continue;
+          const dates = g.lines.map((l) => l.date).sort((x, y) => x - y), a = Math.abs(g.lines[0].amount);
+          const row = { basis: "monthly same amount", name: g.label, account: g.account, lines: g.lines.length, first: dates[0], last: dates[dates.length - 1], min_amount: a, max_amount: a, flags_cleared: 0 };
+          this.routine_rows.push(row);
+          for (const l of g.lines) if (!routine.has(l.id)) routine.set(l.id, row);
+        }
+      }
+      this.flags = this.flags.filter((f) => {
+        if (f.line_id < 0 || !supp.has(f.check.slice(0, 2)) || !routine.has(f.line_id)) return true;
+        if (/^(B1|C3)/.test(f.check) && f.rule_id && protectedRules.has(f.rule_id)) return true;
+        routine.get(f.line_id).flags_cleared++;
+        this.routine_cleared++;
+        return false;
+      });
+      this.routine_rows.sort((a, b) => b.flags_cleared - a.flags_cleared || b.lines - a.lines);
+      const minDates = cfg.repeat_pattern_min_dates, minVendorDates = cfg.repeat_vendor_min_dates;
+      const kAmt = (f) => [f.account, Math.abs(f.amount)].join("|");
+      const kVen = (f) => f.name ? [f.name, f.account].join("|") : null;
+      const dAmt = /* @__PURE__ */ new Map(), dVen = /* @__PURE__ */ new Map();
+      const add = (m, k, t) => {
+        if (k === null) return;
+        if (!m.has(k)) m.set(k, /* @__PURE__ */ new Set());
+        m.get(k).add(t);
+      };
+      for (const f of this.flags) if (f.line_id >= 0 && /^D[12]/.test(f.check)) {
+        add(dAmt, kAmt(f), f.date.getTime());
+        add(dVen, kVen(f), f.date.getTime());
+      }
+      this.repeat_downgraded = 0;
+      for (const f of this.flags) {
+        if (f.line_id < 0 || !/^D[12]/.test(f.check)) continue;
+        const na = dAmt.get(kAmt(f)).size, nv = kVen(f) ? dVen.get(kVen(f)).size : 0;
+        if (na >= minDates || nv >= minVendorDates) {
+          f.severity = "Info";
+          f.detail = (f.detail || "") + (na >= minDates ? ` | The same amount is repeated on ${na} different dates in this account` : ` | This payee has repeated same-day charges on ${nv} different dates`) + ", so this looks like a routine billing pattern, not a double posting.";
+          this.repeat_downgraded++;
+        }
+      }
+    }
+    /** Rules describe one company's habits. When THIS company consistently posts a rule's matches to a different account
+     *  (a different chart of accounts, new vendors), that is its way of booking, not an error: accept it and say so once. */
+    applyRuleLearning() {
+      const cfg = this.rules.rule_learning || {};
+      this.rule_learned = [];
+      this.rule_learned_cleared = 0;
+      if (cfg.enabled === false || !this.rule_hits) return;
+      const protectedRules = new Set((this.rules.routine || {}).protected_rule_ids || []);
+      const accept = /* @__PURE__ */ new Map();
+      for (const [rid, hits] of this.rule_hits) {
+        if (protectedRules.has(rid) || hits.length < cfg.min_lines) continue;
+        const byAcct = /* @__PURE__ */ new Map();
+        for (const h of hits) {
+          const k = h.r.leaf;
+          byAcct.set(k, (byAcct.get(k) || 0) + 1);
+        }
+        const [top, n] = [...byAcct.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (n / hits.length < cfg.min_share || hits.filter((h) => h.ok && h.r.leaf === top).length) continue;
+        const ru = this.rules.keyword_rules.find((x) => x.id === rid);
+        const row = { rule: rid, note: ru ? ru.note : "", account: top, lines: n, of: hits.length, share: n / hits.length, expected: (ru && ru.expected || []).slice(0, 3).join(", "), flags_cleared: 0 };
+        this.rule_learned.push(row);
+        for (const h of hits) if (h.r.leaf === top) accept.set(h.r.id + "|" + rid, row);
+      }
+      this.flags = this.flags.filter((f) => {
+        if (f.line_id < 0 || !f.rule_id || !/^(B1|C3)/.test(f.check)) return true;
+        const row = accept.get(f.line_id + "|" + f.rule_id);
+        if (!row) return true;
+        row.flags_cleared++;
+        this.rule_learned_cleared++;
+        return false;
+      });
+      this.rule_learned.sort((a, b) => b.flags_cleared - a.flags_cleared);
+    }
+    /** Weak flags are made optional (Low/Info) so only items that really need a decision reach the accountant. */
+    refineSeverity() {
+      const c = this.rules.review || {};
+      const byLine = /* @__PURE__ */ new Map();
+      for (const f of this.flags) if (f.line_id >= 0) {
+        if (!byLine.has(f.line_id)) byLine.set(f.line_id, /* @__PURE__ */ new Set());
+        byLine.get(f.line_id).add(f.check.slice(0, 2));
+      }
+      this.refined = 0;
+      const down = (f, sev, why) => {
+        f.severity = sev;
+        f.detail = (f.detail ? f.detail + " | " : "") + why;
+        this.refined++;
+      };
+      for (const f of this.flags) {
+        if (f.line_id < 0 || SEV_RANK[f.severity] < 2) continue;
+        const code = f.check.slice(0, 2), amt = Math.abs(f.amount || 0), other = byLine.get(f.line_id);
+        if (SEV_RANK[f.severity] === 2 && amt < c.small_floor && !["D3", "E7", "B3", "G1", "G2", "G3"].includes(code) && code !== "E5") down(f, "Low", `Small amount (under $${c.small_floor}): optional.`);
+        else if (code === "C2" && this.upworkRx() && this.upworkRx().test(nz(f.memo)) && this.related && this.related.has(f.name)) down(f, "Info", "Paid on behalf of a related company (agreed rule): the name is not expected in the bank memo.");
+        else if (code === "A1" && amt < c.a1_min_amount) down(f, "Low", `Small amount (under $${c.a1_min_amount}): adding the name is optional.`);
+        else if (code === "E1") {
+          const m = /is ([\d.]+) times the typical/.exec(f.issue || ""), mult = m ? +m[1] : 0;
+          if (other.has("E7") || other.has("G1") || other.has("G2") || other.has("G3") || this.upworkRx() && this.upworkRx().test(f.name || "")) down(f, "Info", "Already covered by the cash / allocation checks.");
+          else if (amt < c.e1_min_amount || mult < c.e1_min_multiple) down(f, "Low", `Not large enough to need action (needs at least $${c.e1_min_amount} and ${c.e1_min_multiple} times the typical amount).`);
+        } else if ((code === "D1" || code === "D2") && amt < c.dup_min_amount) down(f, "Info", `Tiny amount (under $${c.dup_min_amount}).`);
+      }
+    }
+    /** One row per thing the accountant must decide: lines with several flags show once, and the same issue on the same payee is grouped. */
+    buildQueue() {
+      const ORDER = (this.rules.review || {}).check_priority || [];
+      const pri = (f) => SEV_RANK[f.severity] * 100 - (ORDER.indexOf(f.check.slice(0, 2)) + 1 || 50);
+      const memoK = (m) => nz(m).toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/[^a-z#]+/g, " ").trim().slice(0, 30);
+      const lineBy = /* @__PURE__ */ new Map(), account = [];
+      for (const f of this.flags) {
+        if (f.line_id < 0) {
+          if (SEV_RANK[f.severity] >= 2) account.push(f);
+          continue;
+        }
+        if (!lineBy.has(f.line_id)) lineBy.set(f.line_id, []);
+        lineBy.get(f.line_id).push(f);
+      }
+      const groups = /* @__PURE__ */ new Map();
+      for (const [id, fs] of lineBy) {
+        fs.sort((a, b) => pri(b) - pri(a));
+        const p = fs[0];
+        if (SEV_RANK[p.severity] < 2) continue;
+        const code = p.check.slice(0, 2);
+        const who = p.name ? normName(p.name) : memoK(p.memo);
+        let key = [code, who, p.account].join("|");
+        if (code[0] === "D") key += "|" + isoDate(p.date) + "|" + Math.round(Math.abs(p.amount) * 100);
+        let g = groups.get(key);
+        if (!g) {
+          g = { memo_key: nz(p.memo).toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/[^a-z#]+/g, " ").replace(/(#\s*)+/g, "# ").trim().slice(0, 40), severity: p.severity, check: p.check, action: p.issue, detail: p.detail, name: p.name || "", account: p.account, suggested_account: p.suggested_account || "", suggested_name: p.suggested_name || "", lines: 0, total: 0, dates: [], example_memo: nz(p.memo), also: /* @__PURE__ */ new Set(), refs: [], line_ids: [] };
+          groups.set(key, g);
+        }
+        if (SEV_RANK[p.severity] > SEV_RANK[g.severity]) g.severity = p.severity;
+        g.lines++;
+        g.total += p.amount || 0;
+        g.dates.push(p.date);
+        g.refs.push(p.source);
+        g.line_ids.push(id);
+        for (const o of fs.slice(1)) g.also.add(o.check);
+      }
+      const q = [];
+      for (const g of groups.values()) {
+        g.dates.sort((a, b) => a - b);
+        q.push({ severity: g.severity, check: g.check, what_to_do: g.action + (g.detail && g.lines === 1 ? " - " + g.detail : ""), name: g.name, account: g.account, suggested_account: g.suggested_account, suggested_name: g.suggested_name, lines: g.lines, total: g.total, first: g.dates[0], last: g.dates[g.dates.length - 1], example_memo: g.example_memo, memo_key: g.memo_key, also_flagged: [...g.also].sort().join("; "), where: g.refs.slice(0, 6).join(", ") + (g.refs.length > 6 ? ` (+${g.refs.length - 6} more)` : ""), line_ids: g.line_ids });
+      }
+      for (const f of account) q.push({ severity: f.severity, check: f.check, what_to_do: f.issue + (f.detail ? " - " + f.detail : ""), name: f.name || "", account: f.account || "", suggested_account: "", suggested_name: "", lines: 0, total: f.amount || 0, first: null, last: null, example_memo: "", also_flagged: "", where: f.source || "", line_ids: [] });
+      const bad = (this.recon || []).filter((r) => r.status === "MISMATCH");
+      const fam = (k) => bad.filter((r) => r.check.startsWith(k));
+      const addRec = (rows, check2, sev, text) => {
+        if (!rows.length) return;
+        q.push({ severity: sev, check: check2, what_to_do: text, name: "", account: "", suggested_account: "", suggested_name: "", lines: 0, total: rows.reduce((a, r) => a + Math.abs(r.difference || 0), 0), first: null, last: null, example_memo: rows.slice(0, 3).map((r) => r.item).join("; "), also_flagged: "", where: "Reconciliation tab (" + rows.length + " rows)", line_ids: [], recon: true });
+      };
+      const cross = [...fam("F0"), ...fam("F1"), ...fam("F3"), ...fam("F4")];
+      addRec(cross, "F1-F4 Reports disagree", cross.length >= 3 ? "High" : "Medium", cross.length >= 3 ? `The reports do not agree with each other (${cross.length} differences, e.g. different line counts or account totals). This usually means they were exported on different days or for different periods. Re-export all reports together for the same period, then run again; do not fix these one by one.` : `${cross.length} difference(s) between the reports. See the Reconciliation tab.`);
+      addRec([...fam("F5")], "F5 Aging vs control account", "Medium", "A/R or A/P aging does not match its control account in the books. Check the aging report date and any open items.");
+      addRec(fam("F6"), "F6 Catch-all balance", "Medium", "Catch-all / clearing accounts should be zero at period end but are not. Reclassify or clear them.");
+      q.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || Math.abs(b.total) - Math.abs(a.total));
+      q.forEach((x, i) => {
+        x.item = "R-" + String(i + 1).padStart(3, "0");
+      });
+      this.queue = q;
+    }
     checkDuplicates() {
-      const t = this.target.filter((r) => r.type !== "General Journal").map((r) => ({ r, amt: npRound(r.amount, 2), mkey: (r.memo || "").toLowerCase().replace(/\s+/g, " ") }));
+      const tAll = this.target.filter((r) => r.type !== "General Journal");
+      const t = tAll.filter((r) => !this.netted || !this.netted.has(r.id)).map((r) => ({ r, amt: npRound(r.amount, 2), mkey: (r.memo || "").toLowerCase().replace(/\s+/g, " ") }));
       const ph = new Set(this.rules.placeholder_names);
       const seen = /* @__PURE__ */ new Set();
       const groups = groupKeyed(t, (x) => {
@@ -1142,7 +1478,7 @@
           );
         }
       }
-      const d = t.map((x) => x.r).filter((r) => r.num !== null && ["Invoice", "Credit Memo", "Bill"].includes(r.type) && /^\d{3,}$/.test(String(r.num)));
+      const d = tAll.filter((r) => r.num !== null && ["Invoice", "Credit Memo", "Bill"].includes(r.type) && /^\d{3,}$/.test(String(r.num)));
       const dg = groupKeyed(d, (r) => {
         const tup = [r.type, String(r.num)];
         return [JSON.stringify(tup), tup];
@@ -1171,9 +1507,9 @@
           this.flag(r, "E5 Negative expense", "Low", "Credit/negative amount on an expense line", "Refund or reversal? Confirm and make sure it hits the same account as the original.", { conf: "Logic" });
         }
         if (["Check", "Credit Card Charge", "Bill", "Invoice"].includes(r.type) && r.amount === 0 && !["AR", "AP"].includes(r.acct_type)) {
-          this.flag(r, "E5 Zero amount", "Low", "Zero-dollar line", "Zero lines add noise; remove unless needed.", { conf: "Logic", adjust: false });
+          this.flag(r, "E5 Zero amount", "Info", "Zero-dollar line", "Zero lines add noise; remove unless needed.", { conf: "Logic", adjust: false });
         }
-        if (["Check", "Credit Card Charge"].includes(r.type) && r.amount >= th.round_amount_min && r.amount % 100 === 0 && r.name !== "Cash Withdrawals") {
+        if (["Check", "Credit Card Charge"].includes(r.type) && r.amount >= th.round_amount_min && r.amount % 100 === 0 && !this.cashNames().has(r.name)) {
           this.flag(r, "E2 Round amount", "Low", `Round-dollar payment $${fmtComma(r.amount, 0)}`, "Large round amounts are worth checking to an invoice/contract.", { conf: "Pattern", adjust: false });
         }
       }
@@ -1193,15 +1529,15 @@
             r,
             "E1 Amount outlier",
             "Medium",
-            `$${fmtComma(r.amount, 2)} is ${fmtFixed(r.amount / med, 1)}x the usual for ${n} / ${a}`,
+            `$${fmtComma(r.amount, 2)} is ${fmtFixed(r.amount / med, 1)} times the typical $${fmtComma(med, 2)} for ${n} / ${a}`,
             `Median of ${g.length} similar lines is $${fmtComma(med, 2)}.`,
             { conf: `${fmtFixed(r.amount / med, 1)}x median` }
           );
         }
       }
-      const RE1 = /(?:purchase|pos sig|pos deb|checkcard)\s+(\d{2})\/(\d{2})\b/i;
+      const RE1 = this.rx("purchase_date_memo") || /$^/;
       const RE2 = /pay period.*?([A-Za-z]{3})\w*\s+(\d{1,2}),?\s*(\d{4})\s*[-–]\s*([A-Za-z]{3})\w*\s+(\d{1,2}),?\s*(\d{4})/i;
-      const RE3 = /PR check date\s+(\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})/;
+      const RE3 = this.rx("payroll_check_date_memo", "") || /$^/;
       for (const r of t) {
         const memo = nz(r.memo);
         if (!memo) continue;
@@ -1361,22 +1697,22 @@
       if (this.bs) this.cmpReports(this.bs, "F4 Balance Sheet Detail vs Transaction Detail", /* @__PURE__ */ new Set(["Bank", "AR", "OtherAsset", "FixedAsset", "AP", "CreditCard", "Liability", "Equity"]));
       if (this.tb && this.tb.size) {
         const tbk = new Map([...this.tb].filter(([k]) => !k.startsWith("__")));
-        if (this.ar && this.ar.size) {
+        if (this.ar && this.ar.size && this.acct.ar_control) {
           const tot = this.ar.has("TOTAL") ? this.ar.get("TOTAL").total : void 0;
           this.rec(
             "F5 AR aging vs control account",
-            "AR aging total vs Accounts Receivable (trial balance)",
-            pyRound(tbk.has("Accounts Receivable") ? tbk.get("Accounts Receivable") : 0, 2),
+            `AR aging total vs ${this.acct.ar_control} (trial balance)`,
+            pyRound(tbk.has(this.acct.ar_control) ? tbk.get(this.acct.ar_control) : 0, 2),
             tot !== void 0 ? pyRound(tot, 2) : null,
             "Difference usually = unapplied payments/credits, a bad A/R entry, or an aging report run on a different date."
           );
         }
-        if (this.ap && this.ap.size) {
+        if (this.ap && this.ap.size && this.acct.ap_control) {
           const tot = this.ap.has("TOTAL") ? this.ap.get("TOTAL").total : void 0;
           this.rec(
             "F5 AP aging vs control account",
-            "AP aging total vs Accounts Payable (trial balance)",
-            pyRound(-(tbk.has("Accounts Payable") ? tbk.get("Accounts Payable") : 0), 2),
+            `AP aging total vs ${this.acct.ap_control} (trial balance)`,
+            pyRound(-(tbk.has(this.acct.ap_control) ? tbk.get(this.acct.ap_control) : 0), 2),
             tot !== void 0 ? pyRound(tot, 2) : null,
             "Difference usually = unapplied vendor credits/payments or an entry posted straight to A/P."
           );
@@ -1442,6 +1778,7 @@
       const keys = new Set(cfg.names || []);
       const cfgKeys = [...keys];
       const auto = /* @__PURE__ */ new Set();
+      const rxToFrom = this.rx("related_to_from"), rxCard = this.rx("related_card");
       if (cfg.auto_detect !== false) {
         const accts = [];
         const s = /* @__PURE__ */ new Set();
@@ -1452,12 +1789,12 @@
         for (const a of accts) {
           const parts = a.split(" > ");
           const last = parts[parts.length - 1];
-          let m = /^to\/from\s+(.+)$/i.exec(last);
+          let m = rxToFrom && rxToFrom.exec(last);
           if (m) {
             keys.add(pyStrip(m[1]));
             auto.add(pyStrip(m[1]));
           }
-          m = /^(.+?)\s+card$/i.exec(last);
+          m = rxCard && rxCard.exec(last);
           if (m && parts.length > 1) {
             keys.add(pyStrip(m[1]));
             auto.add(pyStrip(m[1]));
@@ -1483,6 +1820,25 @@
       this.notes.push("Related parties detected from the reports: " + ([...rel].sort(cmpv).join(", ") || "none"));
     }
     checkApprovedVendors() {
+      const am = this.rules.approved_memo || [];
+      if (am.length) {
+        const mk = (m) => nz(m).toLowerCase().replace(/\d+(\.\d+)?/g, "#").replace(/[^a-z#]+/g, " ").replace(/(#\s*)+/g, "# ").trim().slice(0, 40);
+        const set = new Set(am.map((x) => x.memo_key + "||" + x.account));
+        for (const r of this.target) if (!r.name && set.has(mk(r.memo) + "||" + r.account)) {
+          this.rule_matched_ids.add(r.id);
+          this.rule_ok_ids.add(r.id);
+          this.approved_ok.add(r.id);
+        }
+      }
+      const ap = this.rules.approved_pairs || [];
+      if (ap.length) {
+        const set = new Set(ap.map((x) => normName(x.name) + "||" + x.account));
+        for (const r of this.target) if (r.name && set.has(normName(r.name) + "||" + r.account)) {
+          this.rule_matched_ids.add(r.id);
+          this.rule_ok_ids.add(r.id);
+          this.approved_ok.add(r.id);
+        }
+      }
       const appr = /* @__PURE__ */ new Map();
       for (const [k, v] of Object.entries(this.rules.approved_vendor_accounts || {})) appr.set(normName(k), v);
       if (!appr.size) return;
@@ -1602,23 +1958,23 @@
         else {
           st = "GAP - check";
           this.flagAccountLevel(
-            "G3 Upwork recharge",
+            "G3 Recharge check",
             Math.abs(d) >= 100 ? "Medium" : "Low",
-            `${m}: Upwork charged ${fmtComma(c, 2)} but hours billed ${fmtComma(b, 2)} (difference ${fmtComma(d, 2)})`,
-            `Since ${start} Upwork charges have matched hours billed to LXP/Crysp. This month does not: either hours are not yet billed or a charge belongs to Bluntd.`,
-            { amount: d, source: "Upwork recharge", type_label: "(recharge)", name: "UPWORK" }
+            `${m}: ${cfg.label} charged ${fmtComma(c, 2)} but hours billed ${fmtComma(b, 2)} (difference ${fmtComma(d, 2)})`,
+            `Since ${start} ${cfg.label} charges have matched hours billed to the related companies (${[...this.related].sort().join(", ")}). This month does not: either hours are not yet billed or a charge belongs to ${this.company || "the main company"}.`,
+            { amount: d, source: "Recharge check", type_label: "(recharge)", name: cfg.label }
           );
         }
-        this.recharge_rows.push({ month: m, upwork_charged: c, hours_billed: b, difference: d, status: st });
+        this.recharge_rows.push({ month: m, charged: c, hours_billed: b, difference: d, status: st });
       }
-      if (start) this.notes.push(`Upwork recharge: charges and hours billed matched from ${start}; earlier months are shown as information only.`);
+      if (start) this.notes.push(`${cfg.label} recharge: charges and hours billed matched from ${start}; earlier months are shown as information only.`);
     }
     checkCashPayees() {
       const cashRule = this.rules.keyword_rules.find((r) => r.action === "review");
       if (!cashRule) return;
       const pat = pyRegex(cashRule.pattern, "i");
       const td = this.td;
-      const w = td.filter((l) => l.acct_type === "Bank" && l.amount < 0 && (pat.test(l.memo || "") || l.name === "Cash Withdrawals"));
+      const w = td.filter((l) => l.acct_type === "Bank" && l.amount < 0 && (pat.test(l.memo || "") || (cashRule.names || []).includes(l.name)));
       const payees = this.payeeRows ? loadPayeeList(this.payeeRows) : null;
       if (this.payeeRows && !payees.length) this.notes.push("Payee list was supplied but no rows could be read - check its column headings (date, amount, payee, 1099).");
       const used = /* @__PURE__ */ new Set();
@@ -1626,7 +1982,7 @@
       for (const r of w) {
         const amt = pyRound(-r.amount, 2);
         let pay = "", f1099 = "", status = "No payee list uploaded";
-        if (r.split === "Cash Account") status = "Moved to Cash Account (petty cash)";
+        if (this.acct.petty_cash_split && r.split === this.acct.petty_cash_split) status = `Moved to ${this.acct.petty_cash_split} (petty cash)`;
         else if (payees !== null) {
           const cand = [];
           payees.forEach((p, i) => {
@@ -1664,21 +2020,19 @@
         const g2 = fl.filter((f) => f.rule_id === rid);
         if (g2.length) add(area, issue, g2.length, absSum(g2), where);
       };
-      grp("auto_loan_mercedes", "Account", "Mercedes-Benz Financial payments posted to Bank Service Charges - should reduce the Mercedes loan", "Exceptions: Check B1");
-      grp("finance_charge", "Account", "Card finance charges posted to Bank Service Charges - should be Interest Expense", "Exceptions: Check B1");
-      grp("payroll_words", "Account", "Payroll journals ('Direct deposit employees') posted to Commissions - highlight and reclassify", "Exceptions: Check B1");
-      grp("merchant_processor", "Account", "Card-processor (Greenlight) deposits/fees in Other Income or Bank Service Charges", "Exceptions: Check B1");
-      grp("cash_expensed", "Support", "Cash withdrawals expensed to labor with no identified payee (1099/payroll support)", "Tab 'Cash & 1099'");
-      let g = fl.filter((f) => f.check.startsWith("D1"));
+      for (const ru of this.rules.keyword_rules || []) if (ru.checklist) grp(ru.id, ru.checklist.area, ru.checklist.text, ru.checklist.where);
+      let g = fl.filter((f) => f.check.startsWith("D1") && SEV_RANK[f.severity] >= 2);
       if (g.length) add("Duplicates", "Exact duplicate transactions - confirm against bank and delete the extra", g.length, absSum(g), "Tab 'Duplicates'");
       g = fl.filter((f) => f.check.startsWith("G1"));
-      if (g.length) add("Allocation", "Upwork hours billed to an entity that is not allowed for that worker", g.length, absSum(g), "Exceptions: Check G1");
-      for (const x of fl.filter((f) => f.check.startsWith("G2") || f.check.startsWith("G3"))) add("Upwork", x.issue, 1, x.amount, "Tab 'Upwork Recharge' / 'Upwork Allocation'");
-      for (const r of this.recon) {
-        if (r.status === "MISMATCH" && ["F5", "F6", "F7", "F8", "F2", "F3", "F4"].includes(r.check.slice(0, 2))) {
-          add("Reconciliation", `${r.check}: ${r.item} - ${r.note}`, 1, r.difference !== null ? r.difference : r.actual, "Tab 'Reconciliation'");
-        }
+      if (g.length) add("Allocation", `${(this.rules.upwork || {}).label || "Contractor"} hours billed to an entity that is not allowed for that worker`, g.length, absSum(g), "Exceptions: Check G1");
+      for (const x of fl.filter((f) => f.check.startsWith("G2") || f.check.startsWith("G3"))) add((this.rules.upwork || {}).label || "Recharge", x.issue, 1, x.amount, "Tabs 'Recharge Check' / 'Allocation'");
+      const famRows = /* @__PURE__ */ new Map();
+      for (const r of this.recon) if (r.status === "MISMATCH" && ["F5", "F6", "F7", "F8", "F2", "F3", "F4", "F1", "F0"].includes(r.check.slice(0, 2))) {
+        const k = r.check;
+        if (!famRows.has(k)) famRows.set(k, []);
+        famRows.get(k).push(r);
       }
+      for (const [k, rows2] of famRows) add("Reconciliation", `${k}: ${rows2.length} difference(s). ${rows2[0].note || ""} (first: ${rows2[0].item}). Often caused by reports exported on different days - re-export together.`, rows2.length, rows2.reduce((a2, r) => a2 + Math.abs(r.difference || 0), 0), "Tab 'Reconciliation'");
       for (const c of this.new_related || []) {
         add("Checkpoint", `New related company found in the books: "${c}". Confirm it is a related company and add it to the related-company list (rules) so allocation and recharge checks include it.`, null, null, 'Page: "New related companies" / rules.json related_parties');
       }
@@ -1724,6 +2078,7 @@
       S("build history", this.buildHistory);
       S("build name index", this.buildNameIndex);
       S("detect related parties", this.detectRelatedParties);
+      S("net +/- pairs", this.computeNetPairs);
       S("A. completeness", this.checkCompleteness);
       S("B1/C3 keyword rules", this.checkKeywordRules);
       S("B3 approved vendors", this.checkApprovedVendors);
@@ -1732,12 +2087,17 @@
       S("C. names", this.checkNames);
       S("D. duplicates", this.checkDuplicates);
       S("E. unusual items", this.checkUnusual);
-      S("G1/G2 Upwork allocation", this.checkAllocation);
-      S("G3 Upwork recharge", this.checkUpworkRecharge);
+      S("G1/G2 allocation", this.checkAllocation);
+      S("G3 recharge", this.checkUpworkRecharge);
       S("E7 cash withdrawals / payee list", this.checkCashPayees);
       S("F. reconciliations", this.checkReconciliations);
+      S("apply netting", this.applyNetting);
+      S("routine items", this.applyRoutine);
+      S("learn how this company books rule matches", this.applyRuleLearning);
       if (this.approved_ok.size) this.flags = this.flags.filter((f) => !this.approved_ok.has(f.line_id) || ["D1", "D2", "D3"].includes(f.check.slice(0, 2)));
+      S("make weak flags optional", this.refineSeverity);
       S("basis / coverage", this.computeBasis);
+      S("review queue", this.buildQueue);
       S("review checklist", this.buildChecklist);
       this.inputNotes();
       return this;
@@ -1946,6 +2306,9 @@
     const now = /* @__PURE__ */ new Date();
     const p2 = (n) => String(n).padStart(2, "0");
     put(2, 0, `Generated ${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}   |   Rules: ${rulesName}`);
+    put(3, 0, `ITEMS TO REVIEW: ${(rv.queue || []).length}  (${(rv.queue || []).filter((x) => x.severity === "High").length} high) - work from the 'To Review' tab only; the other tabs are supporting detail.`, (c) => {
+      c.font = { bold: true, color: { argb: "FFC00000" } };
+    });
     const r0 = 5;
     put(r0, 0, "Exceptions by severity", bold);
     const sevCount = {};
@@ -2008,27 +2371,34 @@
       put(r2 + 2 + i, 2, rg.get(k).bad);
     });
     const r3 = r2 + 4 + rgKeys.length;
-    put(r3, 0, "Top 15 items to look at first", bold);
-    ["Ref", "Severity", "Date", "Name", "Amount", "Issue"].forEach((h, j) => put(r3 + 1, j, h, styleHeader));
-    lineFl.slice(0, 15).forEach((x, i) => {
-      put(r3 + 2 + i, 0, x.ref);
+    put(r3, 0, "Top 15 items to look at first (full list: To Review tab)", bold);
+    ["Item", "Severity", "Lines", "Name", "Amount", "What to do"].forEach((h, j) => put(r3 + 1, j, h, styleHeader));
+    const queue = rv.queue || [];
+    queue.slice(0, 15).forEach((x, i) => {
+      put(r3 + 2 + i, 0, x.item);
       put(r3 + 2 + i, 1, x.severity, sevStyle(x.severity));
-      put(r3 + 2 + i, 2, x.date ? isoDate(x.date) : "");
+      put(r3 + 2 + i, 2, x.lines || "");
       put(r3 + 2 + i, 3, nz(x.name));
-      put(r3 + 2 + i, 4, x.amount, (c) => {
+      put(r3 + 2 + i, 4, x.total, (c) => {
         c.numFmt = NUMFMT;
       });
-      put(r3 + 2 + i, 5, x.issue);
+      put(r3 + 2 + i, 5, x.what_to_do.slice(0, 160));
     });
     const r4 = r3 + 19;
     put(r4, 0, "Notes & limits", bold);
     const notes = [
       ...rv.notes,
       "Account/name suggestions are rule- and history-based. They are leads for a human reviewer, not automatic corrections.",
-      "Reviewer columns (Action / Notes) on the Exceptions tab are blank for you to fill in.",
+      "Work from the To Review tab. Account Review / Name Review / Duplicates / Unusual show only High and Medium lines; Low and Info (optional) flags are only on the Exceptions tab.",
       "'Funding side' lines (bank, credit card, A/R, A/P, undeposited funds) are not categorised; they are checked via duplicates and reconciliations."
     ];
     notes.forEach((n, i) => put(r4 + 1 + i, 0, n));
+    const qCols = ["item", "severity", "check", "what_to_do", "name", "account", "suggested_account", "lines", "total", "first", "last", "example_memo", "also_flagged", "where", "reviewer_action", "reviewer_notes"];
+    const qRows = (rv.queue || []).map((x) => qCols.map((c) => c === "reviewer_action" || c === "reviewer_notes" ? null : c === "total" ? x.total : cellOrBlank(x[c])));
+    const qws = addSheet(wb, "To Review", qCols, qRows, { widths: { what_to_do: 70, name: 26, account: 30, suggested_account: 26, example_memo: 46, also_flagged: 24, where: 34, reviewer_action: 18, reviewer_notes: 30 }, sev: true });
+    if (qRows.length) qws.dataValidations.add(`O2:O${qRows.length + 1}`, { type: "list", allowBlank: true, formulae: ['"Fixed,Accepted as is,Ask client,Needs support"'] });
+    wb.worksheets.splice(wb.worksheets.indexOf(qws), 1);
+    wb.worksheets.splice(1, 0, qws);
     const exCols = ["ref", "severity", "check", "issue", "detail", "date", "type", "num", "name", "memo", "account", "cls", "amount", "split", "suggested_account", "suggested_name", "confidence", "source", "reviewer_action", "reviewer_notes"];
     const exRows = fl.map((f) => exCols.map((c) => c === "reviewer_action" || c === "reviewer_notes" ? null : cellOrBlank(f[c])));
     const exW = { issue: 48, detail: 60, memo: 50, account: 28, name: 26, suggested_account: 26, suggested_name: 24 };
@@ -2040,7 +2410,7 @@
       Unusual: ["A2", "E1", "E2", "E4", "E5", "E6", "E7"]
     };
     const ci = exCols.indexOf("check");
-    for (const [tab, pref] of Object.entries(themes)) addSheet(wb, tab, exCols, exRows.filter((r) => pref.includes(r[ci].slice(0, 2))), { widths: exW, sev: true });
+    for (const [tab, pref] of Object.entries(themes)) addSheet(wb, tab, exCols, exRows.filter((r) => pref.includes(r[ci].slice(0, 2)) && (r[1] === "High" || r[1] === "Medium")), { widths: exW, sev: true });
     const rcCols = ["check", "item", "expected", "actual", "difference", "status", "note"];
     addSheet(wb, "Reconciliation", rcCols, rc.map((r) => rcCols.map((c) => cellOrBlank(r[c]))), { widths: { item: 60, note: 80, check: 34 }, textFlag: { col: [0, 6], text: "MISMATCH", argb: SEV_FILL.High } });
     const tl2 = td.filter((l) => !l.is_funding && l.name !== null);
@@ -2113,14 +2483,22 @@
       ckWs.dataValidations.add(`F2:F${rv.checklist.length + 1}`, { type: "list", allowBlank: true, formulae: ['"Open,In progress,Resolved,Accepted as is"'] });
     }
     const aCols = ["worker", "month", "entity", "amount", "share_of_worker_month", "rule"];
-    addSheet(wb, "Upwork Allocation", aCols, rv.alloc_rows.map((r) => aCols.map((c) => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
-    const uCols = ["month", "upwork_charged", "hours_billed", "difference", "status"];
-    addSheet(wb, "Upwork Recharge", uCols, rv.recharge_rows.map((r) => uCols.map((c) => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
+    addSheet(wb, "Allocation", aCols, rv.alloc_rows.map((r) => aCols.map((c) => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
+    const uCols = ["month", "charged", "hours_billed", "difference", "status"];
+    addSheet(wb, "Recharge Check", uCols, rv.recharge_rows.map((r) => uCols.map((c) => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
     const cCols = ["date", "amount", "bank_memo", "expensed_to", "payee", "form_1099", "status"];
     addSheet(wb, "Cash & 1099", cCols, rv.cash_rows.map((r) => cCols.map((c) => cellOrBlank(r[c]))), { widths: { rule: 60, bank_memo: 50, expensed_to: 30, status: 34 } });
     const lgCols = ["step", "status", "message"];
     addSheet(wb, "Run Log", lgCols, rv.run_log.map((r) => lgCols.map((c) => r[c])), { widths: { step: 40, message: 90 } });
     addSheet(wb, "Related Parties", ["related_party", "status"], [...rv.related].sort(cmpv2).map((x) => [x, "In books"]).concat((rv.new_related || []).map((x) => [x, "NEW - confirm and add to rules"])), { widths: { related_party: 40, status: 34 } });
+    const nCols = ["pair", "name", "account", "amount", "date_plus", "date_minus", "days_apart", "memo_plus", "memo_minus", "flags_cleared"];
+    addSheet(wb, "Netted Pairs", nCols, (rv.net_pairs || []).map((np, i) => [i + 1, np.pos.name, np.pos.account, Math.abs(np.pos.amount), np.pos.date, np.neg.date, np.gap, np.pos.memo, np.neg.memo, np.cleared || 0]), { widths: { name: 30, account: 34, memo_plus: 40, memo_minus: 40 } });
+    const rCols = ["basis", "name", "account", "lines", "first_used", "last_used", "min_amount", "max_amount", "flags_cleared"];
+    addSheet(wb, "Routine Items", rCols, (rv.routine_rows || []).map((r) => [r.basis, r.name, r.account, r.lines, r.first, r.last, r.min_amount, r.max_amount, r.flags_cleared]), { widths: { name: 32, account: 40 } });
+    const sCols = ["rule", "what_it_checks", "accounts_it_expects", "status"];
+    addSheet(wb, "Rules Not Applied", sCols, (rv.rules_skipped || []).map((r) => [r.rule, r.note, r.expected, "Skipped: none of these accounts exist in these books"]), { widths: { what_it_checks: 50, accounts_it_expects: 60, status: 50 } });
+    const lCols = ["rule", "what_it_checks", "this_company_posts_to", "lines", "of_matching_lines", "share", "rule_expected", "flags_cleared"];
+    addSheet(wb, "Learned Rules", lCols, (rv.rule_learned || []).map((r) => [r.rule, r.note, r.account, r.lines, r.of, r.share, r.expected, r.flags_cleared]), { widths: { what_it_checks: 50, this_company_posts_to: 34, rule_expected: 50 } });
     const kCols = ["checkpoint", "date", "type", "num", "name", "memo", "account", "amount"];
     addSheet(wb, "Checkpoints", kCols, (rv.checkpoint_rows || []).map((r) => kCols.map((c) => cellOrBlank(c === "date" && r[c] ? r[c] : r[c]))), { widths: { memo: 50, account: 34, name: 28, checkpoint: 16 } });
     const rrCols = ["id", "applies_to", "pattern", "expected_accounts", "severity", "note"];
@@ -2131,6 +2509,7 @@
     });
     const summary = {
       total: fl.length,
+      queue: { items: queue.length, high: queue.filter((x) => x.severity === "High").length, medium: queue.filter((x) => x.severity === "Medium").length, lines: queue.reduce((a, x) => a + x.lines, 0), recon_items: queue.filter((x) => x.recon).length, rows: queue.map((x) => ({ memo_key: x.memo_key || "", item: x.item, sev: x.severity, check: x.check, what: x.what_to_do, name: x.name, account: x.account, suggested: x.suggested_account, lines: x.lines, total: x.total })) },
       severity: { High: sevCount.High, Medium: sevCount.Medium, Low: sevCount.Low, Info: sevCount.Info },
       recon_bad: reconBad,
       period: [isoDate(rv.period[0]), isoDate(rv.period[1])],
@@ -2141,6 +2520,10 @@
       top: lineFl.slice(0, 25).map((f) => ({ ref: f.ref, sev: f.severity, date: f.date ? isoDate(f.date) : "", name: f.name || "", amount: f.amount, issue: f.issue })),
       notes: notes.slice(0, rv.notes.length),
       new_related: rv.new_related || [],
+      routine: { items: (rv.routine_rows || []).length, flags_cleared: rv.routine_cleared || 0, repeat_downgraded: rv.repeat_downgraded || 0 },
+      skipped_rules: (rv.rules_skipped || []).length,
+      learned: { rules: (rv.rule_learned || []).length, flags_cleared: rv.rule_learned_cleared || 0 },
+      netted: { pairs: (rv.net_pairs || []).length, lines: (rv.net_pairs || []).length * 2, flags_cleared: rv.net_flags_cleared || 0 },
       checkpoints: (rv.checkpoint_rows || []).map((r) => ({ date: r.date ? isoDate(r.date) : "", type: r.type, name: r.name || "", memo: r.memo || "", account: r.account, amount: r.amount, checkpoint: r.checkpoint })),
       detected: opts.detected || null,
       coverage: Number.isNaN(cov) ? null : cov,
@@ -2158,7 +2541,7 @@
 
   // rules.json
   var rules_default = {
-    _readme: "Editable rule book. keyword_rules: if the regex matches the Name and/or Memo and the posted account is NOT in 'expected', the line is flagged and the first expected account is suggested. Add/adjust rules as you learn the client's habits - no code change needed.",
+    _readme: "Editable rule book. keyword_rules: if the regex matches the Name and/or Memo and the posted account is NOT in 'expected', the line is flagged and the first expected account is suggested. Add/adjust rules as you learn the client's habits - no code change needed. Everything company-specific lives in this file: accounts, patterns, file_patterns, thresholds, netting, routine, review, upwork, related_parties, allocation_rules, keyword_rules (with optional checklist text).",
     thresholds: {
       high_amount: 5e3,
       tiny_amount: 20,
@@ -2300,7 +2683,12 @@
         types_exclude: [
           "Invoice"
         ],
-        note: "Mercedes-Benz Financial payment: should reduce the Mercedes loan (and interest), not bank fees/expenses."
+        note: "Mercedes-Benz Financial payment: should reduce the Mercedes loan (and interest), not bank fees/expenses.",
+        checklist: {
+          area: "Account",
+          text: "Mercedes-Benz Financial payments posted to Bank Service Charges - should reduce the Mercedes loan",
+          where: "Exceptions: Check B1"
+        }
       },
       {
         id: "auto_loan_other",
@@ -2472,7 +2860,12 @@
           "General Journal",
           "Invoice"
         ],
-        note: "Card processor: fees go to merchant fees; deposits are sales/clearing - never Bank Service Charges or Other Income."
+        note: "Card processor: fees go to merchant fees; deposits are sales/clearing - never Bank Service Charges or Other Income.",
+        checklist: {
+          area: "Account",
+          text: "Card-processor (Greenlight) deposits/fees in Other Income or Bank Service Charges",
+          where: "Exceptions: Check B1"
+        }
       },
       {
         id: "finance_charge",
@@ -2486,7 +2879,12 @@
           "General Journal",
           "Invoice"
         ],
-        note: "Finance/interest charges belong in Interest Expense."
+        note: "Finance/interest charges belong in Interest Expense.",
+        checklist: {
+          area: "Account",
+          text: "Card finance charges posted to Bank Service Charges - should be Interest Expense",
+          where: "Exceptions: Check B1"
+        }
       },
       {
         id: "payroll_words",
@@ -2513,7 +2911,12 @@
           "Deposit",
           "Credit"
         ],
-        note: "Payroll-related memo posted to a non-payroll account."
+        note: "Payroll-related memo posted to a non-payroll account.",
+        checklist: {
+          area: "Account",
+          text: "Payroll journals ('Direct deposit employees') posted to Commissions - highlight and reclassify",
+          where: "Exceptions: Check B1"
+        }
       },
       {
         id: "rent",
@@ -2742,7 +3145,15 @@
         types_exclude: [
           "General Journal"
         ],
-        note: "Bank cash withdrawal expensed straight to labor/expense: payee unknown. Needs support (who was paid, 1099/payroll compliance)."
+        note: "Bank cash withdrawal expensed straight to labor/expense: payee unknown. Needs support (who was paid, 1099/payroll compliance).",
+        checklist: {
+          area: "Support",
+          text: "Cash withdrawals expensed to labor with no identified payee (1099/payroll support)",
+          where: "Tab 'Cash & 1099'"
+        },
+        names: [
+          "Cash Withdrawals"
+        ]
       }
     ],
     related_parties: {
@@ -2783,7 +3194,8 @@
     upwork: {
       charge_memo_pattern: "upwork",
       tolerance_pct: 0.05,
-      split_drift_points: 15
+      split_drift_points: 15,
+      label: "Upwork"
     },
     approved_vendor_accounts: {
       "Kimberly Marrder": [
@@ -2796,20 +3208,133 @@
         message: "Carter (lawyer) - confirm treatment with the accountant; pending item, does not block the review.",
         where: "Name Audit"
       }
-    ]
+    ],
+    netting: {
+      enabled: true,
+      max_days: 62
+    },
+    routine: {
+      enabled: true,
+      min_count: 4,
+      min_share: 0.9,
+      suppress_checks: [
+        "A1",
+        "B1",
+        "B4",
+        "B6",
+        "C2",
+        "C3",
+        "E2"
+      ],
+      repeat_pattern_min_dates: 3,
+      repeat_vendor_min_dates: 5,
+      protected_rule_ids: [
+        "auto_loan_mercedes",
+        "finance_charge",
+        "payroll_words",
+        "merchant_processor",
+        "cash_expensed"
+      ],
+      recurring_min_months: 3
+    },
+    review: {
+      a1_min_amount: 0,
+      e1_min_amount: 1e3,
+      e1_min_multiple: 5,
+      dup_min_amount: 5,
+      small_floor: 25,
+      check_priority: [
+        "B1",
+        "C3",
+        "B2",
+        "B5",
+        "D3",
+        "D1",
+        "D2",
+        "E7",
+        "G1",
+        "G2",
+        "G3",
+        "B3",
+        "E4",
+        "E1",
+        "A1",
+        "C2",
+        "C5",
+        "B4",
+        "B6",
+        "A2",
+        "E2",
+        "E5",
+        "C1",
+        "C4",
+        "E6"
+      ]
+    },
+    accounts: {
+      undeposited_funds: "Undeposited Funds",
+      ar_control: "Accounts Receivable",
+      ap_control: "Accounts Payable",
+      petty_cash_split: "Cash Account",
+      low_value_accounts: [
+        "Bank Service Charges",
+        "Interest Expense",
+        "Other Expense",
+        "Other Income",
+        "Credit Card Cash Rewards"
+      ]
+    },
+    patterns: {
+      bank_feed_memo: "(purchase|pos sig|pos deb|visa|checkcard|\\*)",
+      purchase_date_memo: "(?:purchase|pos sig|pos deb|checkcard)\\s+(\\d{2})\\/(\\d{2})\\b",
+      payroll_check_date_memo: "PR check date\\s+(\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\/\\d{1,2}\\/\\d{4})",
+      related_to_from: "^to\\/from\\s+(.+)$",
+      related_card: "^(.+?)\\s+card$"
+    },
+    file_patterns: {
+      td: "tract?(s|i)?ional|transaction.*detail|trans.*by.*acc",
+      gl: "general ledger",
+      pl: "p\\s*(and|&)\\s*l|profit.*loss",
+      bs: "balance sheet",
+      tb: "trial balance",
+      ar: "\\bar\\b.*report|a\\/r|receivable",
+      ap: "\\bap\\b.*report|a\\/p|payable"
+    },
+    rule_learning: {
+      enabled: true,
+      min_lines: 5,
+      min_share: 0.8
+    },
+    approved_memo: [],
+    approved_pairs: []
   };
 
   // app.js
   var $ = (s) => document.querySelector(s);
   var ROLES = {
-    td: ["Transaction Detail by Account", /tract?(s|i)?ional|transaction.*detail|trans.*by.*acc/],
-    gl: ["General Ledger", /general ledger/],
-    pl: ["Profit & Loss Detail", /p\s*(and|&)\s*l|profit.*loss/],
-    bs: ["Balance Sheet Detail", /balance sheet/],
-    tb: ["Trial Balance", /trial balance/],
-    ar: ["A/R Aging", /\bar\b.*report|a\/r|receivable/],
-    ap: ["A/P Aging", /\bap\b.*report|a\/p|payable/]
+    td: "Transaction Detail by Account",
+    gl: "General Ledger",
+    pl: "Profit & Loss Detail",
+    bs: "Balance Sheet Detail",
+    tb: "Trial Balance",
+    ar: "A/R Aging",
+    ap: "A/P Aging"
   };
+  function deepMerge(base, over) {
+    if (over === void 0) return base;
+    if (Array.isArray(base) || base === null || typeof base !== "object" || Array.isArray(over) || over === null || typeof over !== "object") return over;
+    const o = { ...base };
+    for (const k of Object.keys(over)) o[k] = k in base ? deepMerge(base[k], over[k]) : over[k];
+    return o;
+  }
+  function currentRules() {
+    let user = {};
+    try {
+      user = JSON.parse($("#rules").value || "{}");
+    } catch (_) {
+    }
+    return { merged: deepMerge(rules_default, user), user };
+  }
   var fmt = (n) => n == null ? "" : Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   var esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   var files = [];
@@ -2831,11 +3356,36 @@
   } };
   $("#rules").value = store.get("books.rules") || defaultRules;
   $("#company").value = store.get("books.company") || "";
+  $("#rulesDl").onclick = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([$("#rules").value], { type: "application/json" }));
+    a.download = "rules.json";
+    a.click();
+  };
+  $("#rulesLoad").onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const t = await f.text();
+      JSON.parse(t);
+      $("#rules").value = t;
+      store.set("books.rules", t);
+      $("#rulesMsg").textContent = "Rules loaded from " + f.name;
+    } catch (err) {
+      $("#rulesMsg").textContent = "That file is not valid JSON.";
+    }
+  };
   $("#rules").addEventListener("change", () => store.set("books.rules", $("#rules").value));
   $("#company").addEventListener("change", () => store.set("books.company", $("#company").value));
   function guess(name) {
-    const b = name.toLowerCase();
-    for (const [k, [, re]] of Object.entries(ROLES)) if (re.test(b)) return k;
+    const b = name.toLowerCase().replace(/[_\-.]+/g, " ");
+    const pats = currentRules().merged.file_patterns || {};
+    for (const [k, ps] of Object.entries(pats)) {
+      try {
+        if (new RegExp(ps).test(b)) return k;
+      } catch (_) {
+      }
+    }
     return "";
   }
   function addFiles(list) {
@@ -2856,7 +3406,7 @@
     tb.innerHTML = "";
     files.forEach((x, i) => {
       const tr = document.createElement("tr");
-      const opts = ['<option value="">\u2014 not used \u2014</option>'].concat(Object.entries(ROLES).map(([k, [l]]) => `<option value="${k}" ${x.role === k ? "selected" : ""}>${l}</option>`)).join("");
+      const opts = ['<option value="">\u2014 not used \u2014</option>'].concat(Object.entries(ROLES).map(([k, l]) => `<option value="${k}" ${x.role === k ? "selected" : ""}>${l}</option>`)).join("");
       tr.innerHTML = `<td>${esc(x.file.name)}</td><td><select data-i="${i}">${opts}</select></td><td><button data-rm="${i}">Remove</button></td>`;
       tb.appendChild(tr);
     });
@@ -2875,10 +3425,10 @@
     const roles = files.map((x) => x.role).filter(Boolean);
     const dup = roles.find((r, i) => roles.indexOf(r) !== i);
     const missing = ["td", "gl"].filter((r) => !roles.includes(r));
-    const opt = Object.keys(ROLES).filter((r) => !roles.includes(r) && !["td", "gl"].includes(r)).map((r) => ROLES[r][0]);
+    const opt = Object.keys(ROLES).filter((r) => !roles.includes(r) && !["td", "gl"].includes(r)).map((r) => ROLES[r]);
     let msg = "";
-    if (dup) msg = `Two files are marked "${ROLES[dup][0]}" \u2014 pick one.`;
-    else if (missing.length) msg = "Still needed: " + missing.map((r) => ROLES[r][0]).join(", ") + ".";
+    if (dup) msg = `Two files are marked "${ROLES[dup]}" \u2014 pick one.`;
+    else if (missing.length) msg = "Still needed: " + missing.map((r) => ROLES[r]).join(", ") + ".";
     else if (opt.length) msg = "Optional reports not added (some checks will be skipped): " + opt.join(", ") + ".";
     else if (files.length) msg = "All 7 reports ready.";
     $("#fmsg").textContent = msg;
@@ -2915,8 +3465,11 @@
   $("#run").onclick = async () => {
     const rules = $("#rules").value;
     let rulesObj;
+    let filled = [];
     try {
-      rulesObj = JSON.parse(rules);
+      const u = JSON.parse(rules);
+      rulesObj = deepMerge(rules_default, u);
+      filled = Object.keys(rules_default).filter((k) => !(k in u) && !k.startsWith("_"));
     } catch (err) {
       setStatus("The rules text is not valid JSON: " + err.message, 0);
       $("#status").classList.add("bad");
@@ -2943,6 +3496,7 @@
       const out = await buildReport(rv, { company: $("#company").value.trim(), rulesName: "rules.json", ExcelJS: window.ExcelJS, detected });
       xlsxBytes = await out.workbook.xlsx.writeBuffer();
       setStatus("Done.", 100);
+      if (filled.length) out.summary.notes.push("These settings were missing from your rules, so the standard values from the bundled rules.json were used: " + filled.join(", ") + ".");
       show(out.summary);
     } catch (err) {
       console.error(err);
@@ -2958,19 +3512,55 @@
     $("#out").classList.remove("hide");
     $("#period").textContent = `Period ${r.period[0]} to ${r.period[1]} \xB7 ${r.lines.total.toLocaleString()} ledger lines (${r.lines.checked.toLocaleString()} checked, ${r.lines.flagged.toLocaleString()} flagged)`;
     const s = r.severity;
-    $("#stats").innerHTML = [["Total exceptions", r.total], ["High", s.High || 0], ["Medium", s.Medium || 0], ["Low", s.Low || 0], ["Reconciliation mismatches", r.recon_bad]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
+    const qd = r.queue || { items: 0, high: 0, medium: 0, lines: 0, rows: [] };
+    $("#stats").innerHTML = [["Items to review", qd.items], ["High", qd.high], ["Medium", qd.medium], ["Ledger lines in them", qd.lines], ["Optional flags (not in the list)", (s.Low || 0) + (s.Info || 0)], ["Report differences (grouped in the list)", qd.recon_items || 0]].map(([l, v]) => `<div class="stat"><b>${v}</b><span>${l}</span></div>`).join("");
     $("#notes").innerHTML = (r.run_problems.length ? `<span class="bad">Some checks were skipped: ${r.run_problems.map((p) => esc(p.step + " \u2013 " + p.message)).join("; ")}</span><br>` : "") + r.notes.map(esc).join("<br>");
     table(
       $("#ck"),
       [{ t: "Area" }, { t: "Issue" }, { t: "Lines", num: 1 }, { t: "Amount", num: 1 }, { t: "Where" }],
       r.checklist.map((c) => [esc(c.area), esc(c.issue), c.lines ?? "", fmt(c.amount), esc(c.where_to_look)])
     );
+    const okable = (t) => t.lines > 0 && !/^(D|E7|F|G)/.test(t.check) && t.account;
     table(
       $("#top"),
-      [{ t: "Ref" }, { t: "Sev" }, { t: "Date" }, { t: "Name" }, { t: "Amount", num: 1 }, { t: "Issue" }],
-      r.top.map((t) => [t.ref, `<span class="tag ${t.sev}">${t.sev}</span>`, t.date, esc(t.name), fmt(t.amount), esc(t.issue)])
+      [{ t: "Item" }, { t: "Sev" }, { t: "Lines", num: 1 }, { t: "Name" }, { t: "Account" }, { t: "Amount", num: 1 }, { t: "What to do" }, { t: "If this is fine" }],
+      qd.rows.map((t, i) => [
+        t.item,
+        `<span class="tag ${t.sev}">${t.sev}</span>`,
+        t.lines || "",
+        esc(t.name),
+        esc(t.account),
+        fmt(t.total),
+        esc(t.what + (t.suggested ? " (suggested: " + t.suggested + ")" : "")),
+        okable(t) ? `<button data-ok="${i}">Always OK</button>` : ""
+      ])
     );
+    $("#top").querySelectorAll("[data-ok]").forEach((b) => b.onclick = () => {
+      const t = qd.rows[+b.dataset.ok];
+      let o;
+      try {
+        o = JSON.parse($("#rules").value);
+      } catch (_) {
+        alert("The rules text is not valid JSON.");
+        return;
+      }
+      if (t.name) {
+        o.approved_pairs = o.approved_pairs || [];
+        if (!o.approved_pairs.some((x) => x.name === t.name && x.account === t.account)) o.approved_pairs.push({ name: t.name, account: t.account });
+      } else if (t.memo_key) {
+        o.approved_memo = o.approved_memo || [];
+        if (!o.approved_memo.some((x) => x.memo_key === t.memo_key && x.account === t.account)) o.approved_memo.push({ memo_key: t.memo_key, account: t.account });
+      } else return;
+      $("#rules").value = JSON.stringify(o, null, 2);
+      store.set("books.rules", $("#rules").value);
+      b.disabled = true;
+      b.textContent = "Saved - applies on the next run";
+    });
     table($("#bychk"), [{ t: "Check" }, { t: "High", num: 1 }, { t: "Medium", num: 1 }, { t: "Low", num: 1 }, { t: "Total", num: 1 }], r.by_check.map((c) => [esc(c.check), c.High || "", c.Medium || "", c.Low || "", c.total]));
+    if (r.netted && r.netted.pairs) $("#notes").innerHTML += `<br><b>Offsetting +/- entries:</b> ${r.netted.pairs} pairs (${r.netted.lines} lines) net to zero, so they are not flagged as errors or duplicates (${r.netted.flags_cleared} flags cleared). Listed on the "Netted Pairs" tab of the Excel report.`;
+    if (r.skipped_rules) $("#notes").innerHTML += `<br><b>Rules not applied:</b> ${r.skipped_rules} built-in rule(s) expect accounts that do not exist in these books, so they were skipped instead of flagging every matching line (see "Rules Not Applied" tab).`;
+    if (r.learned && r.learned.rules) $("#notes").innerHTML += `<br><b>Learned from this company\u2019s books:</b> for ${r.learned.rules} built-in rule(s) the books consistently use a different account than the rule expects, so that is accepted (${r.learned.flags_cleared} flags cleared). See the "Learned Rules" tab.`;
+    if (r.routine && r.routine.flags_cleared) $("#notes").innerHTML += `<br><b>Routine items:</b> ${r.routine.items} vendor/customer-to-account patterns repeat consistently (for example the same monthly bill to the same account), so ${r.routine.flags_cleared} low-level flags on them were cleared. Listed on the "Routine Items" tab.` + (r.routine.repeat_downgraded ? ` ${r.routine.repeat_downgraded} repeated same-size charges that recur on many dates were set to Info.` : "");
     const nr = r.new_related || [];
     $("#newrel").classList.toggle("hide", !nr.length);
     $("#newrelList").innerHTML = nr.map((c) => `<div class="row" style="margin-bottom:8px"><b>${esc(c)}</b><button data-conf="${esc(c)}">Confirm as related company</button><span class="mute"></span></div>`).join("");
