@@ -1356,9 +1356,9 @@
         else if (code === "C2" && this.upworkRx() && this.upworkRx().test(nz(f.memo)) && this.related && this.related.has(f.name)) down(f, "Info", "Paid on behalf of a related company (agreed rule): the name is not expected in the bank memo.");
         else if (code === "A1" && amt < c.a1_min_amount) down(f, "Low", `Small amount (under $${c.a1_min_amount}): adding the name is optional.`);
         else if (code === "E1") {
-          const m = /is ([\d.]+) times the typical/.exec(f.issue || ""), mult = m ? +m[1] : 0;
+          const mult = f.ratio || 0;
           if (other.has("E7") || other.has("G1") || other.has("G2") || other.has("G3") || this.upworkRx() && this.upworkRx().test(f.name || "")) down(f, "Info", "Already covered by the cash / allocation checks.");
-          else if (amt < c.e1_min_amount || mult < c.e1_min_multiple) down(f, "Low", `Not large enough to need action (needs at least $${c.e1_min_amount} and ${c.e1_min_multiple} times the typical amount).`);
+          else if (amt < c.e1_min_amount || mult < c.e1_min_multiple) down(f, "Low", `Not large enough to need action (needs at least $${c.e1_min_amount} and ${c.e1_min_multiple} times the average).`);
         } else if ((code === "D1" || code === "D2") && amt < c.dup_min_amount) down(f, "Info", `Tiny amount (under $${c.dup_min_amount}).`);
       }
     }
@@ -1525,14 +1525,17 @@
         const med = median(g.map((r) => r.amount));
         if (med <= 0) continue;
         for (const r of g.filter((x) => x.amount > med * th.outlier_multiple && x.amount >= th.outlier_min_amount)) {
+          const others = g.filter((x) => x !== r).map((x) => x.amount);
+          const avg = others.reduce((p, q) => p + q, 0) / others.length;
           this.flag(
             r,
             "E1 Amount outlier",
             "Medium",
-            `$${fmtComma(r.amount, 2)} is ${fmtFixed(r.amount / med, 1)} times the typical $${fmtComma(med, 2)} for ${n} / ${a}`,
-            `Median of ${g.length} similar lines is $${fmtComma(med, 2)}.`,
-            { conf: `${fmtFixed(r.amount / med, 1)}x median` }
+            `${n} / ${a}: the average payment is $${fmtComma(avg, 2)}, but this one is $${fmtComma(r.amount, 2)}`,
+            `Based on the other ${others.length} payments (lowest $${fmtComma(Math.min(...others), 2)}, highest $${fmtComma(Math.max(...others), 2)}). Check the invoice or whether it is an annual or one-off charge.`,
+            { conf: "Compared with average" }
           );
+          this.flags[this.flags.length - 1].ratio = r.amount / avg;
         }
       }
       const RE1 = this.rx("purchase_date_memo") || /$^/;
